@@ -170,6 +170,15 @@ STRUCT_CSS_STYLESHEET_SOURCE;
 
 STRUCT_CSS_STYLESHEET;
 
+#define STRUCT_CSS_MATCHED_PROPERTY \
+    struct css_matched_property { \
+        short type; \
+        short specificity; \
+        int value; \
+    }
+
+STRUCT_CSS_MATCHED_PROPERTY;
+
 #define STRUCT_DOM_NODE(qualifier) \
     struct dom_node { \
         qualifier struct dom_node *parent; \
@@ -180,10 +189,27 @@ STRUCT_CSS_STYLESHEET;
         int id; \
         int tag_name; \
         int applicable_declaration_count; \
-        struct css_rule applicable_declarations[16]; \
+        struct css_matched_property applicable_declarations[16]; \
+        int pad[24]; \
     }
 
 STRUCT_DOM_NODE();
+
+// Insertion sort.
+#define SORT_SELECTORS(node) \
+    do { \
+        for (int i = 1; i < node->applicable_declaration_count; i++) { \
+            for (int j = i; \
+                    j > 0 && \
+                    node->applicable_declarations[j - 1].specificity > \
+                    node->applicable_declarations[j].specificity; \
+                    j--) { \
+                struct css_matched_property tmp = node->applicable_declarations[j - 1]; \
+                node->applicable_declarations[j - 1] = node->applicable_declarations[j]; \
+                node->applicable_declarations[j] = tmp; \
+            } \
+        } \
+    } while(0)
 
 #define MATCH_SELECTORS_HASH(node, hash, findfn) \
     do {\
@@ -202,17 +228,27 @@ STRUCT_DOM_NODE();
         MATCH_SELECTORS_HASH(node, &stylesheet->user_agent.tag_names, findfn); \
     } while(0)
 
-#define MATCH_SELECTORS_HASH_PRECOMPUTED(node, hash, findfn, left_index, right_index, qualifier) \
+#define MATCH_SELECTORS_HASH_PRECOMPUTED(node, \
+                                         hash, \
+                                         spec, \
+                                         findfn, \
+                                         left_index, \
+                                         right_index, \
+                                         qualifier) \
     do {\
         qualifier const struct css_rule *__restrict__ rule = findfn(hash, \
                                                                     node->id, \
                                                                     left_index, \
                                                                     right_index); \
-        if (rule != NULL) \
-            node->applicable_declarations[node->applicable_declaration_count++] = *rule; \
+        if (rule != NULL) { \
+            int index = node->applicable_declaration_count++; \
+            node->applicable_declarations[index].type = rule->type; \
+            node->applicable_declarations[index].specificity = spec; \
+            node->applicable_declarations[index].value = rule->value; \
+        } \
     } while(0)
 
-#define MATCH_SELECTORS_PRECOMPUTED(first, stylesheet, index, findfn, hashfn, qualifier) \
+#define MATCH_SELECTORS_PRECOMPUTED(first, stylesheet, index, findfn, hashfn, sortfn, qualifier) \
     do {\
         qualifier struct dom_node *node = &first[index]; \
         node->applicable_declaration_count = 0; \
@@ -222,29 +258,38 @@ STRUCT_DOM_NODE();
         int right_tag_name_index = hashfn(node->tag_name, RIGHT_SEED) % HASH_SIZE; \
         MATCH_SELECTORS_HASH_PRECOMPUTED(node, \
                                          &stylesheet->author.ids, \
+                                         0, \
                                          findfn, \
                                          left_id_index, \
                                          right_id_index, \
                                          qualifier); \
         MATCH_SELECTORS_HASH_PRECOMPUTED(node, \
                                          &stylesheet->author.tag_names, \
+                                         0, \
                                          findfn, \
                                          left_tag_name_index, \
                                          right_tag_name_index, \
                                          qualifier); \
         MATCH_SELECTORS_HASH_PRECOMPUTED(node, \
                                          &stylesheet->user_agent.ids, \
+                                         1, \
                                          findfn, \
                                          left_id_index, \
                                          right_id_index, \
                                          qualifier); \
         MATCH_SELECTORS_HASH_PRECOMPUTED(node, \
                                          &stylesheet->user_agent.tag_names, \
+                                         1, \
                                          findfn, \
                                          left_tag_name_index, \
                                          right_tag_name_index, \
                                          qualifier); \
+        sortfn(node); \
     } while(0)
+
+void sort_selectors(struct dom_node *node) {
+    SORT_SELECTORS(node);
+}
 
 void match_selectors(struct dom_node *first, struct css_stylesheet *stylesheet, int32_t index) {
 #if 0
@@ -255,6 +300,7 @@ void match_selectors(struct dom_node *first, struct css_stylesheet *stylesheet, 
                                 index,
                                 css_cuckoo_hash_find_precomputed,
                                 css_rule_hash,
+                                sort_selectors,
                                 );
 }
 

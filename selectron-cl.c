@@ -18,6 +18,7 @@
 const char *selector_matching_kernel_source = "\n"
     XSTRINGIFY(STRUCT_CSS_RULE) ";\n"
     XSTRINGIFY(STRUCT_CSS_CUCKOO_HASH) ";\n"
+    XSTRINGIFY(STRUCT_CSS_MATCHED_PROPERTY) ";\n"
     XSTRINGIFY(STRUCT_CSS_STYLESHEET_SOURCE) ";\n"
     XSTRINGIFY(STRUCT_CSS_STYLESHEET) ";\n"
     XSTRINGIFY(STRUCT_DOM_NODE(__global)) ";\n"
@@ -33,6 +34,10 @@ const char *selector_matching_kernel_source = "\n"
     "   " XSTRINGIFY(CSS_CUCKOO_HASH_FIND_PRECOMPUTED(hash, key, left_index, right_index)) ";\n"
     "}\n"
     "\n"
+    "void sort_selectors(__global struct dom_node *node) {\n"
+    "   " XSTRINGIFY(SORT_SELECTORS(node)) ";\n"
+    "}\n"
+    "\n"
     "__kernel void match_selectors(__global struct dom_node *first, \n"
     "                              __global struct css_stylesheet *stylesheet) {\n"
     "   " XSTRINGIFY(MATCH_SELECTORS_PRECOMPUTED(first,
@@ -40,6 +45,7 @@ const char *selector_matching_kernel_source = "\n"
                                                  get_global_id(0),
                                                  css_cuckoo_hash_find_precomputed,
                                                  css_rule_hash,
+                                                 sort_selectors,
                                                  __global)) ";\n"
     "}\n";
 
@@ -122,6 +128,27 @@ void go(cl_device_type device_type) {
                                        NULL));
         fprintf(stderr, "Compilation error: %s\n", log);
         exit(1);
+    }
+
+    size_t binary_sizes_sizes;
+    CHECK_CL(clGetProgramInfo(program, CL_PROGRAM_BINARY_SIZES, 0, NULL, &binary_sizes_sizes));
+    size_t *binary_sizes = malloc(sizeof(size_t) * binary_sizes_sizes);
+    CHECK_CL(clGetProgramInfo(program,
+                              CL_PROGRAM_BINARY_SIZES,
+                              binary_sizes_sizes,
+                              binary_sizes,
+                              NULL));
+    char **binaries = malloc(binary_sizes_sizes / sizeof(size_t));
+    for (int i = 0; i < binary_sizes_sizes / sizeof(size_t); i++)
+        binaries[i] = malloc(binary_sizes[i]);
+    CHECK_CL(clGetProgramInfo(program, CL_PROGRAM_BINARIES, binary_sizes_sizes, binaries, NULL));
+    for (int i = 0; i < binary_sizes_sizes / sizeof(size_t); i++) {
+        char *path;
+        asprintf(&path, "prg%c%02d.plist", device_name[0], i);
+        FILE *f = fopen(path, "w");
+        fwrite(binaries[i], binary_sizes[i], 1, f);
+        fclose(f);
+        free(path);
     }
 
     cl_kernel kernel = clCreateKernel(program, "match_selectors", &err);
@@ -253,6 +280,8 @@ int main() {
     PRINT_PLATFORM_INFO(NAME);
     PRINT_PLATFORM_INFO(VENDOR);
     PRINT_PLATFORM_INFO(EXTENSIONS);
+
+    fprintf(stderr, "Size of a DOM node: %d\n", (int)sizeof(struct dom_node));
 
     go(CL_DEVICE_TYPE_GPU);
     go(CL_DEVICE_TYPE_CPU);
