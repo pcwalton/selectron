@@ -312,5 +312,19 @@ void create_frame(struct dom_node *first, int i) {
     frame->type = 0;
 }
 
+// Misc.
+
+void report_timing(const char *name, double ms, bool report_parallel_estimate) {
+    if (report_parallel_estimate) {
+        fprintf(stderr,
+                "%s: %g ms (parallel estimate %g ms)\n",
+                name,
+                ms,
+                ms / ESTIMATED_PARALLEL_SPEEDUP);
+        return;
+    }
+    fprintf(stderr, "%s: %g ms\n", name, ms);
+}
+
 #endif
 

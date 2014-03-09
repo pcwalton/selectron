@@ -119,11 +119,8 @@ int main(int argc, char **argv) {
     }
     float cpu_elapsed = (double)(mach_absolute_time() - cpu_start) / 1000000.0;
 
-    fprintf(stderr,
-            "Selector matching: GPU %g ms, CPU %g ms (parallel CPU estimate %g ms)\n",
-            (double)gpu_elapsed,
-            (double)cpu_elapsed,
-            (double)cpu_elapsed / ESTIMATED_PARALLEL_SPEEDUP);
+    report_timing("Selector matching (GPU)", gpu_elapsed, false);
+    report_timing("Selector matching (CPU)", cpu_elapsed, true);
 
     // Do frame construction.
     cpu_start = mach_absolute_time();
@@ -132,25 +129,17 @@ int main(int argc, char **argv) {
     }
     float frame_construction_cpu_elapsed = (double)(mach_absolute_time() - cpu_start) / 1000000.0;
 
-    fprintf(stderr,
-            "Frame construction: CPU %g ms (parallel CPU estimate %g ms)\n",
-            (double)frame_construction_cpu_elapsed,
-            (double)frame_construction_cpu_elapsed / ESTIMATED_PARALLEL_SPEEDUP);
+    report_timing("Frame construction (CPU)", frame_construction_cpu_elapsed, true);
 
     uint64_t total_cpu_elapsed = cpu_elapsed + frame_construction_cpu_elapsed;
-    fprintf(stderr,
-            "Total CPU: %g ms (parallel CPU estimate %g ms)\n",
-            (double)total_cpu_elapsed,
-            (double)total_cpu_elapsed / ESTIMATED_PARALLEL_SPEEDUP);
+    report_timing("Total (CPU)", total_cpu_elapsed, true);
 
     float best_case_elapsed = fmax(gpu_elapsed, frame_construction_cpu_elapsed);
     float best_case_parallel_elapsed = fmax(
             (double)gpu_elapsed,
             frame_construction_cpu_elapsed / ESTIMATED_PARALLEL_SPEEDUP);
-    fprintf(stderr,
-            "Best-case: %g ms (parallel estimate %g ms)\n",
-            (double)best_case_elapsed,
-            (double)best_case_parallel_elapsed);
+    report_timing("Best-case", best_case_elapsed, false);
+    report_timing("Best-case against parallel", best_case_parallel_elapsed, false);
 
     checkCudaErrors(cudaMemcpy(device_dom_host_mirror,
                                device_dom,
