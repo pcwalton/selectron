@@ -1,0 +1,5 @@
+This is a small collection of experiments related to running CSS on the GPU. Ideas include selector
+matching, frame construction, layout passes (intrinsic width calculation), and more.
+
+All of this should be considered nothing more than very preliminary exploratory work.
+
