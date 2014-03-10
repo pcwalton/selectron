@@ -7,16 +7,13 @@
 #ifndef SELECTRON_H
 #define SELECTRON_H
 
-#include <mach/mach.h>
-#include <mach/mach_time.h>
-
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 
-#define NODE_COUNT              (10240*10)
+#define NODE_COUNT              (1024 * 100)
 #define THREAD_COUNT            1024
 #define PROPERTY_COUNT          512
 #define MAX_DOM_DEPTH           10
@@ -36,7 +33,7 @@
 #define CSS_SELECTOR_TYPE_ID        1
 #define CSS_SELECTOR_TYPE_TAG_NAME  2
 
-#define HASH_SIZE   4096
+#define HASH_SIZE   128
 
 #ifdef MAX
 #undef MAX
@@ -227,7 +224,7 @@ STRUCT_DOM_NODE();
 
 #define MATCH_SELECTORS_HASH(node, hash, findfn) \
     do {\
-        const css_rule *__restrict__ rule = findfn(hash, node->id); \
+        const css_rule *rule = findfn(hash, node->id); \
         if (rule != NULL) \
             node->applicable_declarations[node->applicable_declaration_count++] = *rule; \
     } while(0)
@@ -252,7 +249,7 @@ STRUCT_DOM_NODE();
                                          matched_properties, \
                                          qualifier) \
     do {\
-        qualifier const struct css_rule *__restrict__ rule = findfn(hash, \
+        qualifier const struct css_rule * rule = findfn(hash, \
                                                                     value, \
                                                                     left_index, \
                                                                     right_index); \
@@ -473,16 +470,17 @@ void create_frame(struct dom_node *first, int i) {
 
 // Misc.
 
-void report_timing(const char *name, double ms, bool report_parallel_estimate) {
+void report_timing(const char *name, double ms, bool report_parallel_estimate, bool using_svm) {
     if (report_parallel_estimate) {
         fprintf(stderr,
-                "%s: %g ms (parallel estimate %g ms)\n",
+                "%s%s: %g ms (parallel estimate %g ms)\n",
                 name,
+                using_svm ? " (SVM enabled)" : "",
                 ms,
                 ms / ESTIMATED_PARALLEL_SPEEDUP);
         return;
     }
-    fprintf(stderr, "%s: %g ms\n", name, ms);
+    fprintf(stderr, "%s%s: %g ms\n", name, using_svm ? " (SVM enabled)" : "", ms);
 }
 
 #endif

@@ -6,14 +6,28 @@
 
 #include "selectron.h"
 
+#define WIN32_LEAN_AND_MEAN
+
 #include <stdio.h>
 #include <time.h>
-#include <OpenCL/opencl.h>
+#include <windows.h>
+#include <CL/opencl.h>
+#include <CL/opencl.h>
 
 // Hack to allow stringification of macro expansion
 
 #define XSTRINGIFY(s)   STRINGIFY(s)
 #define STRINGIFY(s)    #s
+
+uint64_t mach_absolute_time() {
+    static LARGE_INTEGER freq = { 0, 0 };
+    if (!freq.QuadPart)
+        QueryPerformanceFrequency(&freq);
+
+    LARGE_INTEGER time;
+    QueryPerformanceCounter(&time);
+    return time.QuadPart * 1000000000 / freq.QuadPart;
+}
 
 const char *selector_matching_kernel_source = "\n"
     XSTRINGIFY(STRUCT_CSS_PROPERTY) ";\n"
@@ -74,24 +88,46 @@ void abort_unless(int error) {
     }
 }
 
-void abort_if_null(void *ptr) {
+void abort_if_null(void *ptr, char *msg = "") {
     if (!ptr) {
-        fprintf(stderr, "OpenCL error");
+        fprintf(stderr, "OpenCL error: %s\n", msg);
     }
 }
 
-void go(cl_device_type device_type) {
+#define FIND_EXTENSION(name, platform) \
+    static name##_fn name = NULL; \
+    do { \
+        if (!name) { \
+            name = (name##_fn)clGetExtensionFunctionAddressForPlatform(platform, #name); \
+            abort_if_null(name, "couldn't find extension " #name); \
+        } \
+    } while(0)
+
+#define MALLOC(context, use_svm, size) \
+    ((use_svm) ? clSVMAllocAMD((context), 0, (size), 4) : malloc((size)))
+
+void go(cl_platform_id platform, cl_device_type device_type, bool use_svm) {
+    FIND_EXTENSION(clSVMAllocAMD, platform);
+    FIND_EXTENSION(clSVMFreeAMD, platform);
+    FIND_EXTENSION(clSetKernelArgSVMPointerAMD, platform);
+
     // Perform OpenCL initialization.
     cl_device_id device_id;
-    CHECK_CL(clGetDeviceIDs(NULL, device_type, 1, &device_id, NULL));
+    CHECK_CL(clGetDeviceIDs(platform, device_type, 1, &device_id, NULL));
     size_t device_name_size;
     CHECK_CL(clGetDeviceInfo(device_id, CL_DEVICE_NAME, 0, NULL, &device_name_size));
-    char *device_name = malloc(device_name_size);
+    char *device_name = (char *)malloc(device_name_size);
     CHECK_CL(clGetDeviceInfo(device_id, CL_DEVICE_NAME, device_name_size, device_name, NULL));
     fprintf(stderr, "device found: %s\n", device_name);
 
+    cl_context_properties props[6] = {
+        CL_CONTEXT_PLATFORM, (cl_context_properties)platform,
+        CL_HSA_ENABLED_AMD, (cl_context_properties)1,
+        0, 0
+    };
+
     cl_int err;
-    cl_context context = clCreateContext(0, 1, &device_id, NULL, NULL, &err);
+    cl_context context = clCreateContextFromType(props, device_type, NULL, NULL, &err);
     CHECK_CL(err);
     abort_if_null(context);
 
@@ -124,7 +160,7 @@ void go(cl_device_type device_type) {
                                        NULL,
                                        &log_size));
 
-        char *log = malloc(log_size);
+        char *log = (char *)malloc(log_size);
         CHECK_CL(clGetProgramBuildInfo(program,
                                        device_id,
                                        CL_PROGRAM_BUILD_LOG,
@@ -137,19 +173,19 @@ void go(cl_device_type device_type) {
 
     size_t binary_sizes_sizes;
     CHECK_CL(clGetProgramInfo(program, CL_PROGRAM_BINARY_SIZES, 0, NULL, &binary_sizes_sizes));
-    size_t *binary_sizes = malloc(sizeof(size_t) * binary_sizes_sizes);
+    size_t *binary_sizes = (size_t *)malloc(sizeof(size_t) * binary_sizes_sizes);
     CHECK_CL(clGetProgramInfo(program,
                               CL_PROGRAM_BINARY_SIZES,
                               binary_sizes_sizes,
                               binary_sizes,
                               NULL));
-    char **binaries = malloc(binary_sizes_sizes / sizeof(size_t));
+    char **binaries = (char **)malloc(binary_sizes_sizes / sizeof(size_t));
     for (int i = 0; i < binary_sizes_sizes / sizeof(size_t); i++)
-        binaries[i] = malloc(binary_sizes[i]);
+        binaries[i] = (char *)malloc(binary_sizes[i]);
     CHECK_CL(clGetProgramInfo(program, CL_PROGRAM_BINARIES, binary_sizes_sizes, binaries, NULL));
     for (int i = 0; i < binary_sizes_sizes / sizeof(size_t); i++) {
-        char *path;
-        asprintf(&path, "prg%c%02d.plist", device_name[0], i);
+        char *path = (char *)malloc(32);
+        sprintf(path, "prg%c%02d.plist", (device_type == CL_DEVICE_TYPE_CPU) ? 'c' : 'g', i);
         FILE *f = fopen(path, "w");
         fwrite(binaries[i], binary_sizes[i], 1, f);
         fclose(f);
@@ -163,75 +199,90 @@ void go(cl_device_type device_type) {
 
     // Create the rule tree on the host.
     struct css_stylesheet *host_stylesheet =
-        (struct css_stylesheet *)malloc(sizeof(struct css_stylesheet));
+        (struct css_stylesheet *)MALLOC(context, use_svm, sizeof(struct css_stylesheet));
+    abort_if_null(host_stylesheet, "failed to allocate host stylesheet");
     struct css_property *host_properties =
-        (struct css_property *)malloc(sizeof(struct css_property) * PROPERTY_COUNT);
+        (struct css_property *)MALLOC(context,
+                                      use_svm,
+                                      sizeof(struct css_property) * PROPERTY_COUNT);
+    abort_if_null(host_properties, "failed to allocate host properties");
     int property_index = 0;
     create_stylesheet(host_stylesheet, host_properties, &property_index);
 
     // Create the DOM tree on the host.
     int global_count = 0;
-    struct dom_node *host_dom = (struct dom_node *)malloc(sizeof(struct dom_node) * NODE_COUNT);
+    struct dom_node *host_dom =
+        (struct dom_node *)MALLOC(context, use_svm, sizeof(struct dom_node) * NODE_COUNT);
+    abort_if_null(host_dom, "failed to allocate host DOM");
     create_dom(host_dom, NULL, &global_count, 0);
 
-    cl_mem device_dom = clCreateBuffer(context,
-                                       CL_MEM_READ_WRITE,
-                                       sizeof(struct dom_node) * NODE_COUNT,
-                                       NULL,
-                                       NULL);
-    abort_if_null(device_dom);
+    cl_mem device_dom, device_stylesheet, device_properties;
+    if (!use_svm) {
+        device_dom = clCreateBuffer(context,
+                                    CL_MEM_READ_WRITE,
+                                    sizeof(struct dom_node) * NODE_COUNT,
+                                    NULL,
+                                    NULL);
+        abort_if_null(device_dom);
 
-    cl_mem device_stylesheet = clCreateBuffer(context,
-                                              CL_MEM_READ_ONLY,
-                                              sizeof(struct css_stylesheet),
-                                              NULL,
-                                              NULL);
-    abort_if_null(device_stylesheet);
+        device_stylesheet = clCreateBuffer(context,
+                                           CL_MEM_READ_ONLY,
+                                           sizeof(struct css_stylesheet),
+                                           NULL,
+                                           NULL);
+        abort_if_null(device_stylesheet);
 
-    cl_mem device_properties = clCreateBuffer(context,
-                                              CL_MEM_READ_ONLY,
-                                              sizeof(struct css_property) * PROPERTY_COUNT,
-                                              NULL,
-                                              NULL);
-    abort_if_null(device_properties);
+        device_properties = clCreateBuffer(context,
+                                           CL_MEM_READ_ONLY,
+                                           sizeof(struct css_property) * PROPERTY_COUNT,
+                                           NULL,
+                                           NULL);
+        abort_if_null(device_properties);
 
-    // Copy over the DOM tree.
-    CHECK_CL(clEnqueueWriteBuffer(commands,
-                                  device_dom,
-                                  CL_TRUE,
-                                  0,
-                                  sizeof(struct dom_node) * NODE_COUNT,
-                                  host_dom,
-                                  0,
-                                  NULL,
-                                  NULL));
+        // Copy over the DOM tree.
+        CHECK_CL(clEnqueueWriteBuffer(commands,
+                                      device_dom,
+                                      CL_TRUE,
+                                      0,
+                                      sizeof(struct dom_node) * NODE_COUNT,
+                                      host_dom,
+                                      0,
+                                      NULL,
+                                      NULL));
 
-    // Copy over the rule tree.
-    CHECK_CL(clEnqueueWriteBuffer(commands,
-                                  device_stylesheet,
-                                  CL_TRUE,
-                                  0,
-                                  sizeof(struct css_stylesheet),
-                                  host_stylesheet,
-                                  0,
-                                  NULL,
-                                  NULL));
+        // Copy over the rule tree.
+        CHECK_CL(clEnqueueWriteBuffer(commands,
+                                      device_stylesheet,
+                                      CL_TRUE,
+                                      0,
+                                      sizeof(struct css_stylesheet),
+                                      host_stylesheet,
+                                      0,
+                                      NULL,
+                                      NULL));
 
-    // Copy over the properties.
-    CHECK_CL(clEnqueueWriteBuffer(commands,
-                                  device_properties,
-                                  CL_TRUE,
-                                  0,
-                                  sizeof(struct css_property) * PROPERTY_COUNT,
-                                  host_properties,
-                                  0,
-                                  NULL,
-                                  NULL));
+        // Copy over the properties.
+        CHECK_CL(clEnqueueWriteBuffer(commands,
+                                      device_properties,
+                                      CL_TRUE,
+                                      0,
+                                      sizeof(struct css_property) * PROPERTY_COUNT,
+                                      host_properties,
+                                      0,
+                                      NULL,
+                                      NULL));
+    }
 
     // Set the arguments to the kernel.
-    CHECK_CL(clSetKernelArg(kernel, 0, sizeof(cl_mem), &device_dom));
-    CHECK_CL(clSetKernelArg(kernel, 1, sizeof(cl_mem), &device_stylesheet));
-    CHECK_CL(clSetKernelArg(kernel, 2, sizeof(cl_mem), &device_properties));
+    if (!use_svm) {
+        CHECK_CL(clSetKernelArg(kernel, 0, sizeof(cl_mem), &device_dom));
+        CHECK_CL(clSetKernelArg(kernel, 1, sizeof(cl_mem), &device_stylesheet));
+        CHECK_CL(clSetKernelArg(kernel, 2, sizeof(cl_mem), &device_properties));
+    } else {
+        CHECK_CL(clSetKernelArgSVMPointerAMD(kernel, 0, host_dom));
+        CHECK_CL(clSetKernelArgSVMPointerAMD(kernel, 1, host_stylesheet));
+        CHECK_CL(clSetKernelArgSVMPointerAMD(kernel, 2, host_properties));
+    }
 
     // Figure out the allowable size.
     size_t local_workgroup_size;
@@ -260,39 +311,44 @@ void go(cl_device_type device_type) {
 
     // Report timing.
     double elapsed = (double)(mach_absolute_time() - start) / 1000000.0;
-    report_timing(device_name, elapsed, false);
+    report_timing(device_name, elapsed, false, use_svm);
 
-    // Retrieve the DOM.
-    struct dom_node *device_dom_mirror = malloc(sizeof(struct dom_node) * NODE_COUNT);
-    CHECK_CL(clEnqueueReadBuffer(commands,
-                                 device_dom,
-                                 CL_TRUE,
-                                 0,
-                                 sizeof(struct dom_node) * NODE_COUNT,
-                                 device_dom_mirror,
-                                 0,
-                                 NULL,
-                                 NULL));
+    if (!use_svm) {
+        // Retrieve the DOM.
+        struct dom_node *device_dom_mirror = (struct dom_node *)malloc(sizeof(struct dom_node) *
+                                                                       NODE_COUNT);
+        CHECK_CL(clEnqueueReadBuffer(commands,
+                                     device_dom,
+                                     CL_TRUE,
+                                     0,
+                                     sizeof(struct dom_node) * NODE_COUNT,
+                                     device_dom_mirror,
+                                     0,
+                                     NULL,
+                                     NULL));
+        clFinish(commands);
 
-    clFinish(commands);
+        check_dom(device_dom_mirror);
 
-    check_dom(device_dom_mirror);
+        clReleaseMemObject(device_dom);
+        clReleaseMemObject(device_stylesheet);
+        clReleaseMemObject(device_properties);
+    } else {
+        check_dom(host_dom);
+    }
 
-    clReleaseMemObject(device_dom);
-    clReleaseMemObject(device_stylesheet);
-    clReleaseMemObject(device_properties);
     clReleaseProgram(program);
     clReleaseKernel(kernel);
     clReleaseCommandQueue(commands);
     clReleaseContext(context);
 }
 
-#define PRINT_PLATFORM_INFO(name) \
+#define PRINT_PLATFORM_INFO(platform, name) \
     do { \
         size_t size; \
-        CHECK_CL(clGetPlatformInfo(NULL, CL_PLATFORM_##name, 0, NULL, &size)); \
-        char *result = malloc(size); \
-        CHECK_CL(clGetPlatformInfo(NULL, CL_PLATFORM_##name, size, result, NULL)); \
+        CHECK_CL(clGetPlatformInfo(platform, CL_PLATFORM_##name, 0, NULL, &size)); \
+        char *result = (char *)malloc(size); \
+        CHECK_CL(clGetPlatformInfo(platform, CL_PLATFORM_##name, size, result, NULL)); \
         fprintf(stderr, "%s: %s\n", #name, result); \
         free(result); \
     } while(0)
@@ -301,18 +357,23 @@ int main() {
     cl_platform_id platforms[10];
     cl_uint num_platforms;
     CHECK_CL(clGetPlatformIDs(10, platforms, &num_platforms));
-    fprintf(stderr, "%d platform(s) available\n", (int)num_platforms);
+    fprintf(stderr,
+            "%d platform(s) available: first ID %d\n",
+            (int)num_platforms,
+            (int)platforms[0]);
+    cl_platform_id platform = platforms[0];
 
-    PRINT_PLATFORM_INFO(PROFILE);
-    PRINT_PLATFORM_INFO(VERSION);
-    PRINT_PLATFORM_INFO(NAME);
-    PRINT_PLATFORM_INFO(VENDOR);
-    PRINT_PLATFORM_INFO(EXTENSIONS);
+    PRINT_PLATFORM_INFO(platform, PROFILE);
+    PRINT_PLATFORM_INFO(platform, VERSION);
+    PRINT_PLATFORM_INFO(platform, NAME);
+    PRINT_PLATFORM_INFO(platform, VENDOR);
+    PRINT_PLATFORM_INFO(platform, EXTENSIONS);
 
     fprintf(stderr, "Size of a DOM node: %d\n", (int)sizeof(struct dom_node));
 
-    go(CL_DEVICE_TYPE_GPU);
-    go(CL_DEVICE_TYPE_CPU);
+    go(platform, CL_DEVICE_TYPE_GPU, true);
+    go(platform, CL_DEVICE_TYPE_GPU, false);
+    go(platform, CL_DEVICE_TYPE_CPU, false);
     return 0;
 }
 
