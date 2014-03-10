@@ -16,9 +16,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#define NODE_COUNT 102400
-#define THREAD_COUNT 1024
-#define MAX_DOM_DEPTH 10
+#define NODE_COUNT              102400
+#define THREAD_COUNT            1024
+#define PROPERTY_COUNT          512
+#define MAX_DOM_DEPTH           10
+#define MAX_PROPERTIES_PER_RULE 5
+#define MAX_STYLE_PROPERTIES    32
+#define MAX_PROPERTY_VALUE      8
 
 #define ESTIMATED_PARALLEL_SPEEDUP  2.7
 
@@ -41,12 +45,22 @@
 #define LEFT_SEED   12345
 #define RIGHT_SEED  67890
 
+#define STRUCT_CSS_PROPERTY \
+    struct css_property { \
+        int name; \
+        int value; \
+    }
+
+STRUCT_CSS_PROPERTY;
+
 // FIXME(pcwalton): This is not really implemented properly; it should resize the table.
 
 #define STRUCT_CSS_RULE \
     struct css_rule { \
         int type; \
         int value; \
+        int property_index; \
+        int property_count; \
     }
 
 STRUCT_CSS_RULE;
@@ -172,9 +186,9 @@ STRUCT_CSS_STYLESHEET;
 
 #define STRUCT_CSS_MATCHED_PROPERTY \
     struct css_matched_property { \
-        short type; \
-        short specificity; \
-        int value; \
+        int specificity; \
+        int property_index; \
+        int property_count; \
     }
 
 STRUCT_CSS_MATCHED_PROPERTY;
@@ -188,25 +202,23 @@ STRUCT_CSS_MATCHED_PROPERTY;
         qualifier struct dom_node *prev_sibling; \
         int id; \
         int tag_name; \
-        int applicable_declaration_count; \
-        struct css_matched_property applicable_declarations[16]; \
-        int pad[24]; \
+        int style[MAX_STYLE_PROPERTIES]; \
     }
 
 STRUCT_DOM_NODE();
 
 // Insertion sort.
-#define SORT_SELECTORS(node) \
+#define SORT_SELECTORS(matched_properties, count) \
     do { \
-        for (int i = 1; i < node->applicable_declaration_count; i++) { \
+        for (int i = 1; i < count; i++) { \
             for (int j = i; \
                     j > 0 && \
-                    node->applicable_declarations[j - 1].specificity > \
-                    node->applicable_declarations[j].specificity; \
+                    matched_properties[j - 1].specificity > \
+                    matched_properties[j].specificity; \
                     j--) { \
-                struct css_matched_property tmp = node->applicable_declarations[j - 1]; \
-                node->applicable_declarations[j - 1] = node->applicable_declarations[j]; \
-                node->applicable_declarations[j] = tmp; \
+                struct css_matched_property tmp = matched_properties[j - 1]; \
+                matched_properties[j - 1] = matched_properties[j]; \
+                matched_properties[j] = tmp; \
             } \
         } \
     } while(0)
@@ -228,75 +240,106 @@ STRUCT_DOM_NODE();
         MATCH_SELECTORS_HASH(node, &stylesheet->user_agent.tag_names, findfn); \
     } while(0)
 
-#define MATCH_SELECTORS_HASH_PRECOMPUTED(node, \
+#define MATCH_SELECTORS_HASH_PRECOMPUTED(value, \
                                          hash, \
                                          spec, \
                                          findfn, \
                                          left_index, \
                                          right_index, \
+                                         count, \
+                                         matched_properties, \
                                          qualifier) \
     do {\
         qualifier const struct css_rule *__restrict__ rule = findfn(hash, \
-                                                                    node->id, \
+                                                                    value, \
                                                                     left_index, \
                                                                     right_index); \
         if (rule != NULL) { \
-            int index = node->applicable_declaration_count++; \
-            node->applicable_declarations[index].type = rule->type; \
-            node->applicable_declarations[index].specificity = spec; \
-            node->applicable_declarations[index].value = rule->value; \
+            int index = count++; \
+            matched_properties[index].specificity = spec; \
+            matched_properties[index].property_index = rule->property_index; \
+            matched_properties[index].property_count = rule->property_count; \
         } \
     } while(0)
 
-#define MATCH_SELECTORS_PRECOMPUTED(first, stylesheet, index, findfn, hashfn, sortfn, qualifier) \
+#define MATCH_SELECTORS_PRECOMPUTED(first, \
+                                    stylesheet, \
+                                    properties, \
+                                    index, \
+                                    findfn, \
+                                    hashfn, \
+                                    sortfn, \
+                                    qualifier) \
     do {\
         qualifier struct dom_node *node = &first[index]; \
-        node->applicable_declaration_count = 0; \
+        int count = 0; \
+        struct css_matched_property matched_properties[16]; \
         int left_id_index = hashfn(node->id, LEFT_SEED) % HASH_SIZE; \
         int right_id_index = hashfn(node->id, RIGHT_SEED) % HASH_SIZE; \
         int left_tag_name_index = hashfn(node->tag_name, LEFT_SEED) % HASH_SIZE; \
         int right_tag_name_index = hashfn(node->tag_name, RIGHT_SEED) % HASH_SIZE; \
-        MATCH_SELECTORS_HASH_PRECOMPUTED(node, \
+        MATCH_SELECTORS_HASH_PRECOMPUTED(node->id, \
                                          &stylesheet->author.ids, \
                                          0, \
                                          findfn, \
                                          left_id_index, \
                                          right_id_index, \
+                                         count, \
+                                         matched_properties, \
                                          qualifier); \
-        MATCH_SELECTORS_HASH_PRECOMPUTED(node, \
+        MATCH_SELECTORS_HASH_PRECOMPUTED(node->tag_name, \
                                          &stylesheet->author.tag_names, \
                                          0, \
                                          findfn, \
                                          left_tag_name_index, \
                                          right_tag_name_index, \
+                                         count, \
+                                         matched_properties, \
                                          qualifier); \
-        MATCH_SELECTORS_HASH_PRECOMPUTED(node, \
+        MATCH_SELECTORS_HASH_PRECOMPUTED(node->id, \
                                          &stylesheet->user_agent.ids, \
                                          1, \
                                          findfn, \
                                          left_id_index, \
                                          right_id_index, \
+                                         count, \
+                                         matched_properties, \
                                          qualifier); \
-        MATCH_SELECTORS_HASH_PRECOMPUTED(node, \
+        MATCH_SELECTORS_HASH_PRECOMPUTED(node->tag_name, \
                                          &stylesheet->user_agent.tag_names, \
                                          1, \
                                          findfn, \
                                          left_tag_name_index, \
                                          right_tag_name_index, \
+                                         count, \
+                                         matched_properties, \
                                          qualifier); \
-        sortfn(node); \
+        sortfn(matched_properties, count); \
+        for (int i = 0; i < count; i++) { \
+            struct css_matched_property *matched = &matched_properties[i]; \
+            int count = matched->property_count; \
+            for (int j = 0; j < count; j++) { \
+                qualifier struct css_property *property = \
+                    &properties[matched->property_index + j]; \
+                node->style[property->name] = property->value; \
+            } \
+        } \
     } while(0)
 
-void sort_selectors(struct dom_node *node) {
-    SORT_SELECTORS(node);
+void sort_selectors(struct css_matched_property *matched_properties, int length) {
+   SORT_SELECTORS(matched_properties, length);
 }
 
-void match_selectors(struct dom_node *first, struct css_stylesheet *stylesheet, int32_t index) {
+void match_selectors(struct dom_node *first,
+                     struct css_stylesheet *stylesheet,
+                     struct css_property *properties,
+                     int32_t index) {
 #if 0
     MATCH_SELECTORS(first, stylesheet, index, css_cuckoo_hash_find);
 #endif
     MATCH_SELECTORS_PRECOMPUTED(first,
                                 stylesheet,
+                                properties,
                                 index,
                                 css_cuckoo_hash_find_precomputed,
                                 css_rule_hash,
@@ -304,26 +347,49 @@ void match_selectors(struct dom_node *first, struct css_stylesheet *stylesheet, 
                                 );
 }
 
-void create_stylesheet(struct css_stylesheet *stylesheet) {
+void create_properties(struct css_rule *rule,
+                       struct css_property *properties,
+                       int *property_index) {
+    int n_properties = rand() % MAX_PROPERTIES_PER_RULE;
+    rule->property_index = *property_index;
+    rule->property_count = n_properties;
+
+    for (int i = 0; i < n_properties; i++) {
+        properties[*property_index].name = rand() % MAX_STYLE_PROPERTIES;
+        properties[*property_index].value = rand() % MAX_PROPERTY_VALUE;
+        if (++*property_index >= PROPERTY_COUNT) {
+            fprintf(stderr, "out of properties, try increasing PROPERTY_COUNT\n");
+            exit(1);
+        }
+    }
+}
+
+void create_stylesheet(struct css_stylesheet *stylesheet,
+                       struct css_property *properties,
+                       int *property_index) {
     css_cuckoo_hash_init(&stylesheet->author.ids);
     css_cuckoo_hash_init(&stylesheet->author.tag_names);
     css_cuckoo_hash_init(&stylesheet->user_agent.ids);
     css_cuckoo_hash_init(&stylesheet->user_agent.tag_names);
 
     for (int i = 0; i < RULE_ID_MAX; i++) {
-        struct css_rule rule = { CSS_SELECTOR_TYPE_ID, i };
+        struct css_rule rule = { CSS_SELECTOR_TYPE_ID, i, 0, 0 };
+        create_properties(&rule, properties, property_index);
         css_cuckoo_hash_insert(&stylesheet->author.ids, &rule);
     }
     for (int i = 0; i < RULE_ID_MAX; i++) {
-        struct css_rule rule = { CSS_SELECTOR_TYPE_ID, i };
+        struct css_rule rule = { CSS_SELECTOR_TYPE_ID, i, 0, 0 };
+        create_properties(&rule, properties, property_index);
         css_cuckoo_hash_insert(&stylesheet->user_agent.ids, &rule);
     }
     for (int i = 0; i < RULE_TAG_NAME_MAX; i++) {
-        struct css_rule rule = { CSS_SELECTOR_TYPE_TAG_NAME, i };
+        struct css_rule rule = { CSS_SELECTOR_TYPE_TAG_NAME, i, 0, 0 };
+        create_properties(&rule, properties, property_index);
         css_cuckoo_hash_insert(&stylesheet->author.tag_names, &rule);
     }
     for (int i = 0; i < RULE_TAG_NAME_MAX; i++) {
-        struct css_rule rule = { CSS_SELECTOR_TYPE_TAG_NAME, i };
+        struct css_rule rule = { CSS_SELECTOR_TYPE_TAG_NAME, i, 0, 0 };
+        create_properties(&rule, properties, property_index);
         css_cuckoo_hash_insert(&stylesheet->user_agent.tag_names, &rule);
     }
 }
@@ -337,7 +403,8 @@ void create_dom(struct dom_node *dest, struct dom_node *parent, int *global_coun
     struct dom_node *node = &dest[(*global_count)++];
     node->id = rand() % NODE_ID_MAX;
     node->tag_name = rand() % NODE_TAG_NAME_MAX;
-    node->applicable_declaration_count = 0;
+    for (int i = 0; i < MAX_STYLE_PROPERTIES; i++)
+        node->style[i] = 0;
 
     node->first_child = node->last_child = node->next_sibling = NULL;
     if ((node->parent = parent) != NULL) {
@@ -367,7 +434,12 @@ void munge_dom_pointers(struct dom_node *node, ptrdiff_t offset) {
 
 void check_dom(struct dom_node *node) {
     for (int i = 0; i < 20; i++) {
-        printf("%d -> %d\n", node[i].id, node[i].applicable_declaration_count);
+        printf("%d (id %d, tag %d) -> ", i, node[i].id, node[i].tag_name);
+        for (int j = 0; j < MAX_STYLE_PROPERTIES; j++) {
+            if (node[i].style[j] != 0)
+                printf("%d=%d ", j, node[i].style[j]);
+        }
+        printf("\n");
     }
 }
 

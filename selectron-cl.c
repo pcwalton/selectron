@@ -16,6 +16,7 @@
 #define STRINGIFY(s)    #s
 
 const char *selector_matching_kernel_source = "\n"
+    XSTRINGIFY(STRUCT_CSS_PROPERTY) ";\n"
     XSTRINGIFY(STRUCT_CSS_RULE) ";\n"
     XSTRINGIFY(STRUCT_CSS_CUCKOO_HASH) ";\n"
     XSTRINGIFY(STRUCT_CSS_MATCHED_PROPERTY) ";\n"
@@ -34,14 +35,16 @@ const char *selector_matching_kernel_source = "\n"
     "   " XSTRINGIFY(CSS_CUCKOO_HASH_FIND_PRECOMPUTED(hash, key, left_index, right_index)) ";\n"
     "}\n"
     "\n"
-    "void sort_selectors(__global struct dom_node *node) {\n"
-    "   " XSTRINGIFY(SORT_SELECTORS(node)) ";\n"
+    "void sort_selectors(struct css_matched_property *matched_properties, int length) {\n"
+    "   " XSTRINGIFY(SORT_SELECTORS(matched_properties, length)) ";\n"
     "}\n"
     "\n"
     "__kernel void match_selectors(__global struct dom_node *first, \n"
-    "                              __global struct css_stylesheet *stylesheet) {\n"
+    "                              __global struct css_stylesheet *stylesheet, \n"
+    "                              __global struct css_property *properties) {\n"
     "   " XSTRINGIFY(MATCH_SELECTORS_PRECOMPUTED(first,
                                                  stylesheet,
+                                                 properties,
                                                  get_global_id(0),
                                                  css_cuckoo_hash_find_precomputed,
                                                  css_rule_hash,
@@ -154,6 +157,21 @@ void go(cl_device_type device_type) {
     cl_kernel kernel = clCreateKernel(program, "match_selectors", &err);
     CHECK_CL(err);
 
+    srand(time(NULL));
+
+    // Create the rule tree on the host.
+    struct css_stylesheet *host_stylesheet =
+        (struct css_stylesheet *)malloc(sizeof(struct css_stylesheet));
+    struct css_property *host_properties =
+        (struct css_property *)malloc(sizeof(struct css_property) * PROPERTY_COUNT);
+    int property_index = 0;
+    create_stylesheet(host_stylesheet, host_properties, &property_index);
+
+    // Create the DOM tree on the host.
+    int global_count = 0;
+    struct dom_node *host_dom = (struct dom_node *)malloc(sizeof(struct dom_node) * NODE_COUNT);
+    create_dom(host_dom, NULL, &global_count, 0);
+
     cl_mem device_dom = clCreateBuffer(context,
                                        CL_MEM_READ_WRITE,
                                        sizeof(struct dom_node) * NODE_COUNT,
@@ -168,17 +186,12 @@ void go(cl_device_type device_type) {
                                               NULL);
     abort_if_null(device_stylesheet);
 
-    srand(time(NULL));
-
-    // Create the rule tree on the host.
-    struct css_stylesheet *host_stylesheet =
-        (struct css_stylesheet *)malloc(sizeof(struct css_stylesheet));
-    create_stylesheet(host_stylesheet);
-
-    // Create the DOM tree on the host.
-    int global_count = 0;
-    struct dom_node *host_dom = (struct dom_node *)malloc(sizeof(struct dom_node) * NODE_COUNT);
-    create_dom(host_dom, NULL, &global_count, 0);
+    cl_mem device_properties = clCreateBuffer(context,
+                                              CL_MEM_READ_ONLY,
+                                              sizeof(struct css_property) * PROPERTY_COUNT,
+                                              NULL,
+                                              NULL);
+    abort_if_null(device_properties);
 
     // Copy over the DOM tree.
     CHECK_CL(clEnqueueWriteBuffer(commands,
@@ -202,9 +215,21 @@ void go(cl_device_type device_type) {
                                   NULL,
                                   NULL));
 
+    // Copy over the properties.
+    CHECK_CL(clEnqueueWriteBuffer(commands,
+                                  device_properties,
+                                  CL_TRUE,
+                                  0,
+                                  sizeof(struct css_property) * PROPERTY_COUNT,
+                                  host_properties,
+                                  0,
+                                  NULL,
+                                  NULL));
+
     // Set the arguments to the kernel.
     CHECK_CL(clSetKernelArg(kernel, 0, sizeof(cl_mem), &device_dom));
     CHECK_CL(clSetKernelArg(kernel, 1, sizeof(cl_mem), &device_stylesheet));
+    CHECK_CL(clSetKernelArg(kernel, 2, sizeof(cl_mem), &device_properties));
 
     // Figure out the allowable size.
     size_t local_workgroup_size;
@@ -253,6 +278,7 @@ void go(cl_device_type device_type) {
 
     clReleaseMemObject(device_dom);
     clReleaseMemObject(device_stylesheet);
+    clReleaseMemObject(device_properties);
     clReleaseProgram(program);
     clReleaseKernel(kernel);
     clReleaseCommandQueue(commands);
