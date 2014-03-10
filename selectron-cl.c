@@ -42,10 +42,12 @@ const char *selector_matching_kernel_source = "\n"
     "__kernel void match_selectors(__global struct dom_node *first, \n"
     "                              __global struct css_stylesheet *stylesheet, \n"
     "                              __global struct css_property *properties) {\n"
+    "   int index = get_global_id(0);\n"
+    "   " XSTRINGIFY(SCRAMBLE_NODE_ID(index)) ";\n"
     "   " XSTRINGIFY(MATCH_SELECTORS_PRECOMPUTED(first,
                                                  stylesheet,
                                                  properties,
-                                                 get_global_id(0),
+                                                 index,
                                                  css_cuckoo_hash_find_precomputed,
                                                  css_rule_hash,
                                                  sort_selectors,

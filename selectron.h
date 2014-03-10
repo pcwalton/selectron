@@ -16,13 +16,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#define NODE_COUNT              102400
+#define NODE_COUNT              (10240*10)
 #define THREAD_COUNT            1024
 #define PROPERTY_COUNT          512
 #define MAX_DOM_DEPTH           10
 #define MAX_PROPERTIES_PER_RULE 5
 #define MAX_STYLE_PROPERTIES    32
 #define MAX_PROPERTY_VALUE      8
+#define DOM_PADDING             0
 
 #define ESTIMATED_PARALLEL_SPEEDUP  2.7
 
@@ -195,14 +196,15 @@ STRUCT_CSS_MATCHED_PROPERTY;
 
 #define STRUCT_DOM_NODE(qualifier) \
     struct dom_node { \
-        qualifier struct dom_node *parent; \
-        qualifier struct dom_node *first_child; \
-        qualifier struct dom_node *last_child; \
-        qualifier struct dom_node *next_sibling; \
-        qualifier struct dom_node *prev_sibling; \
+        /*qualifier struct dom_node *parent;*/ \
+        /*qualifier struct dom_node *first_child;*/ \
+        /*qualifier struct dom_node *last_child;*/ \
+        /*qualifier struct dom_node *next_sibling;*/ \
+        /*qualifier struct dom_node *prev_sibling;*/ \
         int id; \
         int tag_name; \
         int style[MAX_STYLE_PROPERTIES]; \
+        int pad[DOM_PADDING]; \
     }
 
 STRUCT_DOM_NODE();
@@ -326,6 +328,15 @@ STRUCT_DOM_NODE();
         } \
     } while(0)
 
+#define SCRAMBLE_NODE_ID(n) \
+    do { \
+        int nibble0 = (n & 0xf); \
+        int nibble1 = (n & 0xf0) >> 4; \
+        int rest = (n & 0xffffff00); \
+        n = (rest | (nibble0 << 4) | nibble1); \
+    } while(0)
+//#define SCRAMBLE_NODE_ID(n)
+
 void sort_selectors(struct css_matched_property *matched_properties, int length) {
    SORT_SELECTORS(matched_properties, length);
 }
@@ -406,6 +417,7 @@ void create_dom(struct dom_node *dest, struct dom_node *parent, int *global_coun
     for (int i = 0; i < MAX_STYLE_PROPERTIES; i++)
         node->style[i] = 0;
 
+#if 0
     node->first_child = node->last_child = node->next_sibling = NULL;
     if ((node->parent = parent) != NULL) {
         if (node->parent->last_child != NULL) {
@@ -416,12 +428,14 @@ void create_dom(struct dom_node *dest, struct dom_node *parent, int *global_coun
             node->prev_sibling = NULL;
         }
     }
+#endif
 
     int child_count = rand() % (NODE_COUNT / 100);
     for (int i = 0; i < child_count; i++)
         create_dom(dest, node, global_count, depth + 1);
 }
 
+#if 0
 void munge_dom_pointers(struct dom_node *node, ptrdiff_t offset) {
     for (int i = 0; i < NODE_COUNT; i++) {
         node->parent = (struct dom_node *)((ptrdiff_t)node->parent + offset);
@@ -431,6 +445,7 @@ void munge_dom_pointers(struct dom_node *node, ptrdiff_t offset) {
         node->prev_sibling = (struct dom_node *)((ptrdiff_t)node->prev_sibling + offset);
     }
 }
+#endif
 
 void check_dom(struct dom_node *node) {
     for (int i = 0; i < 20; i++) {

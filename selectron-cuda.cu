@@ -28,19 +28,22 @@ __device__ const css_rule *__restrict__ css_cuckoo_hash_find_device(
     CSS_CUCKOO_HASH_FIND(hash, key, css_rule_hash_device);
 }
 
+__device__ void sort_selectors_device(struct css_matched_property *matched_properties,
+                                      int length) {
+    SORT_SELECTORS(matched_properties, length);
+}
+
 __global__ void match_selectors_device(dom_node *first,
-                                       const css_stylesheet *__restrict__ stylesheet) {
-#if 0
-    MATCH_SELECTORS(first,
-                    stylesheet,
-                    blockIdx.x * THREAD_COUNT + threadIdx.x,
-                    css_cuckoo_hash_find_device);
-#endif
+                                       const css_stylesheet *__restrict__ stylesheet,
+                                       css_property *properties) {
     MATCH_SELECTORS_PRECOMPUTED(first,
                                 stylesheet,
+                                properties,
                                 blockIdx.x * THREAD_COUNT + threadIdx.x,
                                 css_cuckoo_hash_find_precomputed_device,
-                                css_rule_hash_device);
+                                css_rule_hash_device,
+                                sort_selectors_device,
+                                );
 }
 
 // Main routine
@@ -71,7 +74,10 @@ int main(int argc, char **argv) {
 
     // Create the rule tree on the host.
     css_stylesheet *host_stylesheet = (css_stylesheet *)malloc(sizeof(css_stylesheet));
-    create_stylesheet(host_stylesheet);
+    struct css_property *host_properties =
+        (struct css_property *)malloc(sizeof(struct css_property) * PROPERTY_COUNT);
+    int property_index = 0;
+    create_stylesheet(host_stylesheet, host_properties, &property_index);
 
     // Create the DOM tree on the host.
     int global_count = 0;
@@ -83,8 +89,6 @@ int main(int argc, char **argv) {
     checkCudaErrors(cudaMalloc((void **)&device_dom, sizeof(struct dom_node) * NODE_COUNT));
     dom_node *device_dom_host_mirror = (dom_node *)malloc(sizeof(struct dom_node) * NODE_COUNT);
     memcpy(device_dom_host_mirror, host_dom, sizeof(struct dom_node) * NODE_COUNT);
-    munge_dom_pointers(device_dom_host_mirror,
-                       (ptrdiff_t)((ptrdiff_t)device_dom_host_mirror - (ptrdiff_t)device_dom));
     checkCudaErrors(cudaMemcpy(device_dom,
                                device_dom_host_mirror,
                                sizeof(struct dom_node) * NODE_COUNT,
@@ -98,6 +102,15 @@ int main(int argc, char **argv) {
                                sizeof(css_stylesheet),
                                cudaMemcpyHostToDevice));
 
+    // Allocate the properties and copy over.
+    css_property *device_properties;
+    checkCudaErrors(cudaMalloc((void **)&device_properties,
+                               sizeof(css_property) * PROPERTY_COUNT));
+    checkCudaErrors(cudaMemcpy(device_properties,
+                               host_properties,
+                               sizeof(css_property) * PROPERTY_COUNT,
+                               cudaMemcpyHostToDevice));
+
     // Create start/stop events.
     cudaEvent_t start, stop;
     checkCudaErrors(cudaEventCreate(&start));
@@ -106,40 +119,14 @@ int main(int argc, char **argv) {
     // Execute the kernel on the GPU.
     checkCudaErrors(cudaEventRecord(start));
     match_selectors_device<<<NODE_COUNT / THREAD_COUNT, THREAD_COUNT>>>(device_dom,
-                                                                        device_stylesheet);
+                                                                        device_stylesheet,
+                                                                        device_properties);
     checkCudaErrors(cudaEventRecord(stop));
     checkCudaErrors(cudaEventSynchronize(stop));
     float gpu_elapsed = 0.0f;
     checkCudaErrors(cudaEventElapsedTime(&gpu_elapsed, start, stop));
 
-    // Execute the kernel on the CPU.
-    uint64_t cpu_start = mach_absolute_time();
-    for (int i = 0; i < NODE_COUNT; i++) {
-        match_selectors(host_dom, host_stylesheet, i);
-    }
-    float cpu_elapsed = (double)(mach_absolute_time() - cpu_start) / 1000000.0;
-
     report_timing("Selector matching (GPU)", gpu_elapsed, false);
-    report_timing("Selector matching (CPU)", cpu_elapsed, true);
-
-    // Do frame construction.
-    cpu_start = mach_absolute_time();
-    for (int i = 0; i < NODE_COUNT; i++) {
-        create_frame(host_dom, i);
-    }
-    float frame_construction_cpu_elapsed = (double)(mach_absolute_time() - cpu_start) / 1000000.0;
-
-    report_timing("Frame construction (CPU)", frame_construction_cpu_elapsed, true);
-
-    uint64_t total_cpu_elapsed = cpu_elapsed + frame_construction_cpu_elapsed;
-    report_timing("Total (CPU)", total_cpu_elapsed, true);
-
-    float best_case_elapsed = fmax(gpu_elapsed, frame_construction_cpu_elapsed);
-    float best_case_parallel_elapsed = fmax(
-            (double)gpu_elapsed,
-            frame_construction_cpu_elapsed / ESTIMATED_PARALLEL_SPEEDUP);
-    report_timing("Best-case", best_case_elapsed, false);
-    report_timing("Best-case against parallel", best_case_parallel_elapsed, false);
 
     checkCudaErrors(cudaMemcpy(device_dom_host_mirror,
                                device_dom,
