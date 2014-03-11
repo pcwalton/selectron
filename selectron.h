@@ -470,17 +470,34 @@ void create_frame(struct dom_node *first, int i) {
 
 // Misc.
 
-void report_timing(const char *name, double ms, bool report_parallel_estimate, bool using_svm) {
+#define MODE_COPYING    0
+#define MODE_MAPPED     1
+#define MODE_SVM        2
+
+const char *mode_to_string(int mode) {
+    switch (mode) {
+    case MODE_COPYING:  return " (copying)";
+    case MODE_MAPPED:   return " (mapped)";
+    default:            return " (SVM)";
+    }
+}
+
+void report_timing(const char *name,
+                   const char *operation,
+                   double ms,
+                   bool report_parallel_estimate,
+                   int mode) {
     if (report_parallel_estimate) {
         fprintf(stderr,
-                "%s%s: %g ms (parallel estimate %g ms)\n",
+                "%s%s %s: %g ms (parallel estimate %g ms)\n",
                 name,
-                using_svm ? " (SVM enabled)" : "",
+                mode_to_string(mode),
+                operation,
                 ms,
                 ms / ESTIMATED_PARALLEL_SPEEDUP);
         return;
     }
-    fprintf(stderr, "%s%s: %g ms\n", name, using_svm ? " (SVM enabled)" : "", ms);
+    fprintf(stderr, "%s%s %s: %g ms\n", name, mode_to_string(mode), operation, ms);
 }
 
 #endif

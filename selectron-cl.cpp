@@ -103,10 +103,26 @@ void abort_if_null(void *ptr, char *msg = "") {
         } \
     } while(0)
 
-#define MALLOC(context, use_svm, size) \
-    ((use_svm) ? clSVMAllocAMD((context), 0, (size), 4) : malloc((size)))
+#define MALLOC(context, commands, err, mode, name, type, count) \
+    do { \
+        if ((mode) == MODE_MAPPED) { \
+            host_##name = (type *)clEnqueueMapBuffer(commands, \
+                                                     device_##name, \
+                                                     CL_TRUE, \
+                                                     CL_MAP_READ | CL_MAP_WRITE, \
+                                                     0, \
+                                                     sizeof(type) * (count), \
+                                                     0, \
+                                                     NULL, \
+                                                     NULL, \
+                                                     &err); \
+            CHECK_CL(err); \
+        } else { \
+            host_##name = (type *)malloc(sizeof(type) * count); \
+        } \
+    } while(0)
 
-void go(cl_platform_id platform, cl_device_type device_type, bool use_svm) {
+void go(cl_platform_id platform, cl_device_type device_type, int mode) {
     FIND_EXTENSION(clSVMAllocAMD, platform);
     FIND_EXTENSION(clSVMFreeAMD, platform);
     FIND_EXTENSION(clSetKernelArgSVMPointerAMD, platform);
@@ -197,33 +213,19 @@ void go(cl_platform_id platform, cl_device_type device_type, bool use_svm) {
 
     srand(time(NULL));
 
-    // Create the rule tree on the host.
-    struct css_stylesheet *host_stylesheet =
-        (struct css_stylesheet *)MALLOC(context, use_svm, sizeof(struct css_stylesheet));
-    abort_if_null(host_stylesheet, "failed to allocate host stylesheet");
-    struct css_property *host_properties =
-        (struct css_property *)MALLOC(context,
-                                      use_svm,
-                                      sizeof(struct css_property) * PROPERTY_COUNT);
-    abort_if_null(host_properties, "failed to allocate host properties");
-    int property_index = 0;
-    create_stylesheet(host_stylesheet, host_properties, &property_index);
-
-    // Create the DOM tree on the host.
-    int global_count = 0;
-    struct dom_node *host_dom =
-        (struct dom_node *)MALLOC(context, use_svm, sizeof(struct dom_node) * NODE_COUNT);
-    abort_if_null(host_dom, "failed to allocate host DOM");
-    create_dom(host_dom, NULL, &global_count, 0);
+    struct css_stylesheet *host_stylesheet = NULL;
+    struct css_property *host_properties = NULL;
+    struct dom_node *host_dom = NULL;
 
     cl_mem device_dom, device_stylesheet, device_properties;
-    if (!use_svm) {
+    if (mode != MODE_SVM) {
         device_dom = clCreateBuffer(context,
                                     CL_MEM_READ_WRITE,
                                     sizeof(struct dom_node) * NODE_COUNT,
                                     NULL,
                                     NULL);
         abort_if_null(device_dom);
+        MALLOC(context, commands, err, mode, dom, struct dom_node, NODE_COUNT);
 
         device_stylesheet = clCreateBuffer(context,
                                            CL_MEM_READ_ONLY,
@@ -231,6 +233,7 @@ void go(cl_platform_id platform, cl_device_type device_type, bool use_svm) {
                                            NULL,
                                            NULL);
         abort_if_null(device_stylesheet);
+        MALLOC(context, commands, err, mode, stylesheet, struct css_stylesheet, 1);
 
         device_properties = clCreateBuffer(context,
                                            CL_MEM_READ_ONLY,
@@ -238,19 +241,63 @@ void go(cl_platform_id platform, cl_device_type device_type, bool use_svm) {
                                            NULL,
                                            NULL);
         abort_if_null(device_properties);
+        MALLOC(context, commands, err, mode, properties, struct css_property, PROPERTY_COUNT);
+    } else {
+        // Allocate the rule tree.
+        host_stylesheet = (struct css_stylesheet *)clSVMAllocAMD(context,
+                                                                 CL_MEM_SVM_ATOMICS_AMD,
+                                                                 sizeof(struct css_stylesheet),
+                                                                 16);
+        abort_if_null(host_stylesheet, "failed to allocate host stylesheet");
+        host_properties = (struct css_property *)clSVMAllocAMD(
+            context,
+            CL_MEM_SVM_ATOMICS_AMD,
+            sizeof(struct css_property) * PROPERTY_COUNT,
+            16);
+        abort_if_null(host_properties, "failed to allocate host properties");
 
-        // Copy over the DOM tree.
-        CHECK_CL(clEnqueueWriteBuffer(commands,
-                                      device_dom,
-                                      CL_TRUE,
-                                      0,
-                                      sizeof(struct dom_node) * NODE_COUNT,
-                                      host_dom,
-                                      0,
-                                      NULL,
-                                      NULL));
+        // Allocate the DOM tree.
+        host_dom = (struct dom_node *)clSVMAllocAMD(context,
+                                                    CL_MEM_SVM_ATOMICS_AMD,
+                                                    sizeof(struct dom_node) * NODE_COUNT,
+                                                    16);
+        abort_if_null(host_dom, "failed to allocate host DOM");
+    }
 
-        // Copy over the rule tree.
+    // Create the stylesheet and the DOM.
+    uint64_t start = mach_absolute_time();
+    int property_index = 0;
+    create_stylesheet(host_stylesheet, host_properties, &property_index);
+    int global_count = 0;
+    create_dom(host_dom, NULL, &global_count, 0);
+
+    double elapsed = (double)(mach_absolute_time() - start) / 1000000.0;
+    report_timing(device_name, "stylesheet/DOM creation", elapsed, false, mode);
+
+    // Unmap or copy buffers if necessary.
+    start = mach_absolute_time();
+    switch (mode) {
+    case MODE_MAPPED:
+        CHECK_CL(clEnqueueUnmapMemObject(commands,
+                                         device_stylesheet,
+                                         host_stylesheet,
+                                         0,
+                                         NULL,
+                                         NULL));
+        CHECK_CL(clEnqueueUnmapMemObject(commands,
+                                         device_properties,
+                                         host_properties,
+                                         0,
+                                         NULL,
+                                         NULL));
+        CHECK_CL(clEnqueueUnmapMemObject(commands,
+                                         device_dom,
+                                         host_dom,
+                                         0,
+                                         NULL,
+                                         NULL));
+        break;
+    case MODE_COPYING:
         CHECK_CL(clEnqueueWriteBuffer(commands,
                                       device_stylesheet,
                                       CL_TRUE,
@@ -260,8 +307,6 @@ void go(cl_platform_id platform, cl_device_type device_type, bool use_svm) {
                                       0,
                                       NULL,
                                       NULL));
-
-        // Copy over the properties.
         CHECK_CL(clEnqueueWriteBuffer(commands,
                                       device_properties,
                                       CL_TRUE,
@@ -271,10 +316,19 @@ void go(cl_platform_id platform, cl_device_type device_type, bool use_svm) {
                                       0,
                                       NULL,
                                       NULL));
+        CHECK_CL(clEnqueueWriteBuffer(commands,
+                                      device_dom,
+                                      CL_TRUE,
+                                      0,
+                                      sizeof(struct dom_node) * NODE_COUNT,
+                                      host_dom,
+                                      0,
+                                      NULL,
+                                      NULL));
     }
 
     // Set the arguments to the kernel.
-    if (!use_svm) {
+    if (mode != MODE_SVM) {
         CHECK_CL(clSetKernelArg(kernel, 0, sizeof(cl_mem), &device_dom));
         CHECK_CL(clSetKernelArg(kernel, 1, sizeof(cl_mem), &device_stylesheet));
         CHECK_CL(clSetKernelArg(kernel, 2, sizeof(cl_mem), &device_properties));
@@ -283,6 +337,9 @@ void go(cl_platform_id platform, cl_device_type device_type, bool use_svm) {
         CHECK_CL(clSetKernelArgSVMPointerAMD(kernel, 1, host_stylesheet));
         CHECK_CL(clSetKernelArgSVMPointerAMD(kernel, 2, host_properties));
     }
+
+    elapsed = (double)(mach_absolute_time() - start) / 1000000.0;
+    report_timing(device_name, "buffer copying", elapsed, false, mode);
 
     // Figure out the allowable size.
     size_t local_workgroup_size;
@@ -296,7 +353,7 @@ void go(cl_platform_id platform, cl_device_type device_type, bool use_svm) {
 
     clFinish(commands);
 
-    uint64_t start = mach_absolute_time();
+    start = mach_absolute_time();
     size_t global_work_size = NODE_COUNT;
     CHECK_CL(clEnqueueNDRangeKernel(commands,
                                     kernel,
@@ -310,10 +367,10 @@ void go(cl_platform_id platform, cl_device_type device_type, bool use_svm) {
     clFinish(commands);
 
     // Report timing.
-    double elapsed = (double)(mach_absolute_time() - start) / 1000000.0;
-    report_timing(device_name, elapsed, false, use_svm);
+    elapsed = (double)(mach_absolute_time() - start) / 1000000.0;
+    report_timing(device_name, "kernel execution", elapsed, false, mode);
 
-    if (!use_svm) {
+    if (mode != MODE_SVM) {
         // Retrieve the DOM.
         struct dom_node *device_dom_mirror = (struct dom_node *)malloc(sizeof(struct dom_node) *
                                                                        NODE_COUNT);
@@ -371,9 +428,10 @@ int main() {
 
     fprintf(stderr, "Size of a DOM node: %d\n", (int)sizeof(struct dom_node));
 
-    go(platform, CL_DEVICE_TYPE_GPU, true);
-    go(platform, CL_DEVICE_TYPE_GPU, false);
-    go(platform, CL_DEVICE_TYPE_CPU, false);
+    go(platform, CL_DEVICE_TYPE_GPU, MODE_COPYING);
+    go(platform, CL_DEVICE_TYPE_GPU, MODE_MAPPED);
+    go(platform, CL_DEVICE_TYPE_GPU, MODE_SVM);
+    go(platform, CL_DEVICE_TYPE_CPU, MODE_MAPPED);
     return 0;
 }
 
