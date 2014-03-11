@@ -245,20 +245,20 @@ void go(cl_platform_id platform, cl_device_type device_type, int mode) {
     } else {
         // Allocate the rule tree.
         host_stylesheet = (struct css_stylesheet *)clSVMAllocAMD(context,
-                                                                 CL_MEM_SVM_ATOMICS_AMD,
+                                                                 0,
                                                                  sizeof(struct css_stylesheet),
                                                                  16);
         abort_if_null(host_stylesheet, "failed to allocate host stylesheet");
         host_properties = (struct css_property *)clSVMAllocAMD(
             context,
-            CL_MEM_SVM_ATOMICS_AMD,
+            0,
             sizeof(struct css_property) * PROPERTY_COUNT,
             16);
         abort_if_null(host_properties, "failed to allocate host properties");
 
         // Allocate the DOM tree.
         host_dom = (struct dom_node *)clSVMAllocAMD(context,
-                                                    CL_MEM_SVM_ATOMICS_AMD,
+                                                    0,
                                                     sizeof(struct dom_node) * NODE_COUNT,
                                                     16);
         abort_if_null(host_dom, "failed to allocate host DOM");
