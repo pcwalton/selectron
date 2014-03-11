@@ -10,15 +10,21 @@
 
 #include <stdio.h>
 #include <time.h>
+
+#ifndef __APPLE__
 #include <windows.h>
 #include <CL/opencl.h>
-#include <CL/opencl.h>
+#else
+#include <mach/mach_time.h>
+#include <OpenCL/OpenCL.h>
+#endif
 
 // Hack to allow stringification of macro expansion
 
 #define XSTRINGIFY(s)   STRINGIFY(s)
 #define STRINGIFY(s)    #s
 
+#ifndef __APPLE__
 uint64_t mach_absolute_time() {
     static LARGE_INTEGER freq = { 0, 0 };
     if (!freq.QuadPart)
@@ -28,6 +34,7 @@ uint64_t mach_absolute_time() {
     QueryPerformanceCounter(&time);
     return time.QuadPart * 1000000000 / freq.QuadPart;
 }
+#endif
 
 const char *selector_matching_kernel_source = "\n"
     XSTRINGIFY(STRUCT_CSS_PROPERTY) ";\n"
@@ -88,7 +95,7 @@ void abort_unless(int error) {
     }
 }
 
-void abort_if_null(void *ptr, char *msg = "") {
+void abort_if_null(void *ptr, const char *msg = "") {
     if (!ptr) {
         fprintf(stderr, "OpenCL error: %s\n", msg);
     }
@@ -120,12 +127,15 @@ void abort_if_null(void *ptr, char *msg = "") {
         } else { \
             host_##name = (type *)malloc(sizeof(type) * count); \
         } \
+        /*fprintf(stderr, "mapped " #name " to %p\n", host_##name);*/ \
     } while(0)
 
 void go(cl_platform_id platform, cl_device_type device_type, int mode) {
+#ifndef NO_SVM
     FIND_EXTENSION(clSVMAllocAMD, platform);
     FIND_EXTENSION(clSVMFreeAMD, platform);
     FIND_EXTENSION(clSetKernelArgSVMPointerAMD, platform);
+#endif
 
     // Perform OpenCL initialization.
     cl_device_id device_id;
@@ -138,7 +148,9 @@ void go(cl_platform_id platform, cl_device_type device_type, int mode) {
 
     cl_context_properties props[6] = {
         CL_CONTEXT_PLATFORM, (cl_context_properties)platform,
+#ifndef NO_SVM
         CL_HSA_ENABLED_AMD, (cl_context_properties)1,
+#endif
         0, 0
     };
 
@@ -243,6 +255,7 @@ void go(cl_platform_id platform, cl_device_type device_type, int mode) {
         abort_if_null(device_properties);
         MALLOC(context, commands, err, mode, properties, struct css_property, PROPERTY_COUNT);
     } else {
+#ifndef NO_SVM
         // Allocate the rule tree.
         host_stylesheet = (struct css_stylesheet *)clSVMAllocAMD(context,
                                                                  0,
@@ -262,6 +275,7 @@ void go(cl_platform_id platform, cl_device_type device_type, int mode) {
                                                     sizeof(struct dom_node) * NODE_COUNT,
                                                     16);
         abort_if_null(host_dom, "failed to allocate host DOM");
+#endif
     }
 
     // Create the stylesheet and the DOM.
@@ -333,9 +347,11 @@ void go(cl_platform_id platform, cl_device_type device_type, int mode) {
         CHECK_CL(clSetKernelArg(kernel, 1, sizeof(cl_mem), &device_stylesheet));
         CHECK_CL(clSetKernelArg(kernel, 2, sizeof(cl_mem), &device_properties));
     } else {
+#ifndef NO_SVM
         CHECK_CL(clSetKernelArgSVMPointerAMD(kernel, 0, host_dom));
         CHECK_CL(clSetKernelArgSVMPointerAMD(kernel, 1, host_stylesheet));
         CHECK_CL(clSetKernelArgSVMPointerAMD(kernel, 2, host_properties));
+#endif
     }
 
     elapsed = (double)(mach_absolute_time() - start) / 1000000.0;
@@ -430,7 +446,9 @@ int main() {
 
     go(platform, CL_DEVICE_TYPE_GPU, MODE_COPYING);
     go(platform, CL_DEVICE_TYPE_GPU, MODE_MAPPED);
+#ifndef NO_SVM
     go(platform, CL_DEVICE_TYPE_GPU, MODE_SVM);
+#endif
     go(platform, CL_DEVICE_TYPE_CPU, MODE_MAPPED);
     return 0;
 }

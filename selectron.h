@@ -143,7 +143,7 @@ void css_cuckoo_hash_insert(struct css_cuckoo_hash *hash, struct css_rule *rule)
         int right_index = hashfn(key, RIGHT_SEED) % HASH_SIZE; \
         if (hash->right[right_index].type != 0 && hash->right[right_index].value == key) \
             return &hash->right[right_index]; \
-        return NULL; \
+        return 0; \
     } while(0)
 
 #define CSS_CUCKOO_HASH_FIND_PRECOMPUTED(hash, key, left_index, right_index) \
@@ -152,7 +152,7 @@ void css_cuckoo_hash_insert(struct css_cuckoo_hash *hash, struct css_rule *rule)
             return &hash->left[left_index]; \
         if (hash->right[right_index].type != 0 && hash->right[right_index].value == key) \
             return &hash->right[right_index]; \
-        return NULL; \
+        return 0; \
     } while(0)
 
 struct css_rule *css_cuckoo_hash_find(struct css_cuckoo_hash *hash, int32_t key) {
@@ -225,7 +225,7 @@ STRUCT_DOM_NODE();
 #define MATCH_SELECTORS_HASH(node, hash, findfn) \
     do {\
         const css_rule *rule = findfn(hash, node->id); \
-        if (rule != NULL) \
+        if (rule != 0) \
             node->applicable_declarations[node->applicable_declaration_count++] = *rule; \
     } while(0)
 
@@ -253,7 +253,7 @@ STRUCT_DOM_NODE();
                                                                     value, \
                                                                     left_index, \
                                                                     right_index); \
-        if (rule != NULL) { \
+        if (rule != 0) { \
             int index = count++; \
             matched_properties[index].specificity = spec; \
             matched_properties[index].property_index = rule->property_index; \
