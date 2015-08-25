@@ -23,7 +23,7 @@
 
 #define NODE_COUNT              (1024 * 100)
 #define CLASS_COUNT             ((NODE_COUNT) * (NODE_CLASS_COUNT_MAX))
-#define THREAD_COUNT            1024
+#define THREAD_COUNT            128
 #define PROPERTY_COUNT          512
 #define MAX_DOM_DEPTH           10
 #define MAX_PROPERTIES_PER_RULE 5
@@ -31,6 +31,7 @@
 #define MAX_PROPERTY_VALUE      8
 #define DOM_PADDING_PRE         0
 #define DOM_PADDING_POST        0
+#define MAX_MATCHED_RULES       16
 
 #define ESTIMATED_PARALLEL_SPEEDUP  2.7
 
@@ -48,14 +49,6 @@
 
 #define LEFT_SEED   12345
 #define RIGHT_SEED  67890
-
-#define STRUCT_CSS_PROPERTY \
-    struct css_property { \
-        int name; \
-        int value; \
-    }
-
-STRUCT_CSS_PROPERTY;
 
 // FIXME(pcwalton): This is not really implemented properly; it should resize the table.
 
@@ -183,20 +176,6 @@ STRUCT_CSS_STYLESHEET;
 
 STRUCT_CSS_MATCHED_PROPERTY;
 
-#define STRUCT_DOM_NODE(qualifier) \
-    struct dom_node { \
-        struct dom_node *parent; \
-        int pad_pre[DOM_PADDING_PRE]; \
-        int id; \
-        int tag_name; \
-        int class_count; \
-        int first_class; \
-        int style[MAX_STYLE_PROPERTIES]; \
-        int pad_post[DOM_PADDING_POST]; \
-    }
-
-STRUCT_DOM_NODE();
-
 // Insertion sort.
 #define SORT_SELECTORS(matched_properties, count) \
     do { \
@@ -220,78 +199,75 @@ STRUCT_DOM_NODE();
                              left_index, \
                              right_index, \
                              count, \
-                             matched_properties, \
+                             matched_rules, \
                              qualifier) \
     do {\
-        qualifier const struct css_rule * rule = findfn(hash, \
-                                                                    value, \
-                                                                    left_index, \
-                                                                    right_index); \
+        qualifier const struct css_rule * rule = \
+            findfn(hash, value, left_index, right_index); \
         if (rule != 0) { \
-            int index = count++; \
-            matched_properties[index].specificity = spec; \
-            matched_properties[index].property_index = rule->property_index; \
-            matched_properties[index].property_count = rule->property_count; \
+            int matched_rule_index = count++; \
+            matched_rules[matched_rule_index] = rule; \
         } \
     } while(0)
 
-#define MATCH_SELECTORS(first, \
-                        stylesheet, \
-                        properties, \
+#define MATCH_SELECTORS(ids, \
+                        tag_names, \
+                        class_counts, \
                         classes, \
+                        stylesheet, \
+                        matched_rule_buffer, \
+                        matched_rule_counts, \
                         index, \
                         findfn, \
                         hashfn, \
                         sortfn, \
                         qualifier) \
-    do {\
-        qualifier struct dom_node *node = &first[index]; \
+    do { \
         int count = 0; \
-        struct css_matched_property matched_properties[16]; \
-        int left_id_index = hashfn(node->id, LEFT_SEED) % HASH_SIZE; \
-        int right_id_index = hashfn(node->id, RIGHT_SEED) % HASH_SIZE; \
-        int left_tag_name_index = hashfn(node->tag_name, LEFT_SEED) % HASH_SIZE; \
-        int right_tag_name_index = hashfn(node->tag_name, RIGHT_SEED) % HASH_SIZE; \
-        MATCH_SELECTORS_HASH(node->id, \
+        qualifier const struct css_rule *local_matched_rules[MAX_MATCHED_RULES]; \
+        int left_id_index = hashfn(ids[index], LEFT_SEED) % HASH_SIZE; \
+        int right_id_index = hashfn(ids[index], RIGHT_SEED) % HASH_SIZE; \
+        int left_tag_name_index = hashfn(tag_names[index], LEFT_SEED) % HASH_SIZE; \
+        int right_tag_name_index = hashfn(tag_names[index], RIGHT_SEED) % HASH_SIZE; \
+        MATCH_SELECTORS_HASH(ids[index], \
                              &stylesheet->author.ids, \
                              0, \
                              findfn, \
                              left_id_index, \
                              right_id_index, \
                              count, \
-                             matched_properties, \
+                             local_matched_rules, \
                              qualifier); \
-        MATCH_SELECTORS_HASH(node->tag_name, \
+        MATCH_SELECTORS_HASH(tag_names[index], \
                              &stylesheet->author.tag_names, \
                              0, \
                              findfn, \
                              left_tag_name_index, \
                              right_tag_name_index, \
                              count, \
-                             matched_properties, \
+                             local_matched_rules, \
                              qualifier); \
-        MATCH_SELECTORS_HASH(node->id, \
+        MATCH_SELECTORS_HASH(ids[index], \
                              &stylesheet->user_agent.ids, \
                              1, \
                              findfn, \
                              left_id_index, \
                              right_id_index, \
                              count, \
-                             matched_properties, \
+                             local_matched_rules, \
                              qualifier); \
-        MATCH_SELECTORS_HASH(node->tag_name, \
+        MATCH_SELECTORS_HASH(tag_names[index], \
                              &stylesheet->user_agent.tag_names, \
                              1, \
                              findfn, \
                              left_tag_name_index, \
                              right_tag_name_index, \
                              count, \
-                             matched_properties, \
+                             local_matched_rules, \
                              qualifier); \
-        int class_count = node->class_count; \
-        int first_class = node->first_class; \
+        int class_count = class_counts[index]; \
         for (int i = 0; i < class_count; i++) { \
-            int klass = classes[first_class + i]; \
+            int klass = classes[i * NODE_COUNT + index]; \
             int left_class_index = hashfn(klass, LEFT_SEED) % HASH_SIZE; \
             int right_class_index = hashfn(klass, RIGHT_SEED) % HASH_SIZE; \
             MATCH_SELECTORS_HASH(klass, \
@@ -301,7 +277,7 @@ STRUCT_DOM_NODE();
                                  left_class_index, \
                                  right_class_index, \
                                  count, \
-                                 matched_properties, \
+                                 local_matched_rules, \
                                  qualifier); \
             MATCH_SELECTORS_HASH(klass, \
                                  &stylesheet->user_agent.classes, \
@@ -310,18 +286,14 @@ STRUCT_DOM_NODE();
                                  left_class_index, \
                                  right_class_index, \
                                  count, \
-                                 matched_properties, \
+                                 local_matched_rules, \
                                  qualifier); \
         } \
-        sortfn(matched_properties, count); \
+        count = min(count, MAX_MATCHED_RULES); \
+        matched_rule_counts[index] = count; \
         for (int i = 0; i < count; i++) { \
-            struct css_matched_property *matched = &matched_properties[i]; \
-            int count = matched->property_count; \
-            for (int j = 0; j < count; j++) { \
-                qualifier struct css_property *property = \
-                    &properties[matched->property_index + j]; \
-                node->style[property->name] = property->value; \
-            } \
+            qualifier const struct css_rule *matched = local_matched_rules[i]; \
+            matched_rule_buffer[index + NODE_COUNT * i] = matched; \
         } \
     } while(0)
 
@@ -340,6 +312,7 @@ void sort_selectors(struct css_matched_property *matched_properties, int length)
    SORT_SELECTORS(matched_properties, length);
 }
 
+#if 0
 void match_selectors(struct dom_node *first,
                      struct css_stylesheet *stylesheet,
                      struct css_property *properties,
@@ -355,75 +328,58 @@ void match_selectors(struct dom_node *first,
                     sort_selectors,
                     );
 }
+#endif
 
-void create_properties(struct css_rule *rule,
-                       struct css_property *properties,
-                       int *property_index) {
+void create_properties(struct css_rule *rule, int *property_index) {
     int n_properties = rand() % MAX_PROPERTIES_PER_RULE;
     rule->property_index = *property_index;
     rule->property_count = n_properties;
-
-    for (int i = 0; i < n_properties; i++) {
-        properties[*property_index].name = rand() % MAX_STYLE_PROPERTIES;
-        properties[*property_index].value = rand() % MAX_PROPERTY_VALUE;
-        if (++*property_index >= PROPERTY_COUNT) {
-            fprintf(stderr, "out of properties, try increasing PROPERTY_COUNT\n");
-            exit(1);
-        }
-    }
+    *property_index += n_properties;
 }
 
 void init_rule_hash(struct css_cuckoo_hash *hash,
-                    struct css_property *properties,
                     int *property_index,
                     int type,
                     int max) {
     css_cuckoo_hash_init(hash);
     for (int i = 0; i < max; i++) {
         struct css_rule rule = { type, i, 0, 0 };
-        create_properties(&rule, properties, property_index);
+        create_properties(&rule, property_index);
         css_cuckoo_hash_insert(hash, &rule);
     }
 }
 
-void create_stylesheet(struct css_stylesheet *stylesheet,
-                       struct css_property *properties,
-                       int *property_index) {
+void create_stylesheet(struct css_stylesheet *stylesheet, int *property_index) {
     init_rule_hash(&stylesheet->author.ids,
-                   properties,
                    property_index,
                    CSS_SELECTOR_TYPE_ID,
                    RULE_ID_MAX);
     init_rule_hash(&stylesheet->author.tag_names,
-                   properties,
                    property_index,
                    CSS_SELECTOR_TYPE_TAG_NAME,
                    RULE_TAG_NAME_MAX);
     init_rule_hash(&stylesheet->author.classes,
-                   properties,
                    property_index,
                    CSS_SELECTOR_TYPE_TAG_NAME,
                    RULE_CLASS_MAX);
     init_rule_hash(&stylesheet->user_agent.ids,
-                   properties,
                    property_index,
                    CSS_SELECTOR_TYPE_ID,
                    RULE_ID_MAX);
     init_rule_hash(&stylesheet->user_agent.tag_names,
-                   properties,
                    property_index,
                    CSS_SELECTOR_TYPE_TAG_NAME,
                    RULE_TAG_NAME_MAX);
     init_rule_hash(&stylesheet->user_agent.classes,
-                   properties,
                    property_index,
                    CSS_SELECTOR_TYPE_TAG_NAME,
                    RULE_CLASS_MAX);
 }
 
-void create_dom(struct dom_node *dest,
+void create_dom(int *dest_ids,
+                int *dest_tag_names,
+                int *dest_class_counts,
                 int *dest_classes,
-                struct dom_node *parent,
                 int *class_count,
                 int *global_count,
                 int depth) {
@@ -432,20 +388,13 @@ void create_dom(struct dom_node *dest,
     if (depth == MAX_DOM_DEPTH)
         return;
 
-    struct dom_node *node = &dest[(*global_count)++];
-    node->id = rand() % NODE_ID_MAX;
-    node->tag_name = rand() % NODE_TAG_NAME_MAX;
+    int index = (*global_count)++;
+    dest_ids[index] = rand() % NODE_ID_MAX;
+    dest_tag_names[index] = rand() % NODE_TAG_NAME_MAX;
 
-    node->class_count = rand() % NODE_CLASS_COUNT_MAX;
-    node->first_class = *class_count;
-    *class_count += node->class_count;
-    for (int i = 0; i < node->class_count; i++)
-        dest_classes[node->first_class + i] = rand() % NODE_CLASS_MAX;
-
-    for (int i = 0; i < MAX_STYLE_PROPERTIES; i++)
-        node->style[i] = 0;
-
-    node->parent = parent;
+    dest_class_counts[index] = rand() % NODE_CLASS_COUNT_MAX;
+    for (int i = 0; i < dest_class_counts[index]; i++)
+        dest_classes[index + i * NODE_COUNT] = rand() % NODE_CLASS_MAX;
 
 #if 0
     node->first_child = node->last_child = node->next_sibling = NULL;
@@ -462,7 +411,13 @@ void create_dom(struct dom_node *dest,
 
     int child_count = rand() % (NODE_COUNT / 100);
     for (int i = 0; i < child_count; i++)
-        create_dom(dest, dest_classes, node, class_count, global_count, depth + 1);
+        create_dom(dest_ids,
+                   dest_tag_names,
+                   dest_class_counts,
+                   dest_classes,
+                   class_count,
+                   global_count,
+                   depth + 1);
 }
 
 #if 0
@@ -477,16 +432,20 @@ void munge_dom_pointers(struct dom_node *node, ptrdiff_t offset) {
 }
 #endif
 
-void check_dom(struct dom_node *node, int *classes) {
+void check_dom(const int *ids,
+               const int *tag_names,
+               const int *class_counts,
+               const int *classes,
+               const css_rule **matched_rules,
+               const int *matched_rule_counts) {
     for (int i = 0; i < 20; i++) {
-        printf("%d (id %d; tag %d; classes", i, node[i].id, node[i].tag_name);
-        for (int j = 0; j < node[i].class_count; j++) {
-            printf("%s%d", j == 0 ? " " : ", ", classes[node[i].first_class + j]);
+        printf("%d (id %d; tag %d; classes", i, ids[i], tag_names[i]);
+        for (int j = 0; j < class_counts[i]; j++) {
+            printf("%s%d", j == 0 ? " " : ", ", classes[i + j * NODE_COUNT]);
         }
         printf(") -> ");
-        for (int j = 0; j < MAX_STYLE_PROPERTIES; j++) {
-            if (node[i].style[j] != 0)
-                printf("%d=%d ", j, node[i].style[j]);
+        for (int j = 0; j < matched_rule_counts[i]; j++) {
+            printf("%p ", matched_rules[i + j * NODE_COUNT]);
         }
         printf("\n");
     }
@@ -494,6 +453,7 @@ void check_dom(struct dom_node *node, int *classes) {
 
 // Frame tree
 
+#if 0
 struct frame {
     struct dom_node *node;
     int32_t type;
@@ -504,6 +464,7 @@ void create_frame(struct dom_node *first, int i) {
     frame->node = &first[i];
     frame->type = 0;
 }
+#endif
 
 // Misc.
 

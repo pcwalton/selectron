@@ -37,13 +37,11 @@ uint64_t mach_absolute_time() {
 #endif
 
 const char *selector_matching_kernel_source = "\n"
-    XSTRINGIFY(STRUCT_CSS_PROPERTY) ";\n"
     XSTRINGIFY(STRUCT_CSS_RULE) ";\n"
     XSTRINGIFY(STRUCT_CSS_CUCKOO_HASH) ";\n"
     XSTRINGIFY(STRUCT_CSS_MATCHED_PROPERTY) ";\n"
     XSTRINGIFY(STRUCT_CSS_STYLESHEET_SOURCE) ";\n"
     XSTRINGIFY(STRUCT_CSS_STYLESHEET) ";\n"
-    XSTRINGIFY(STRUCT_DOM_NODE(__global)) ";\n"
     "unsigned int css_rule_hash(unsigned int key, unsigned int seed) {\n"
     "   " XSTRINGIFY(CSS_RULE_HASH(key, seed)) ";\n"
     "}\n"
@@ -59,15 +57,21 @@ const char *selector_matching_kernel_source = "\n"
     "   " XSTRINGIFY(SORT_SELECTORS(matched_properties, length)) ";\n"
     "}\n"
     "\n"
-    "__kernel void match_selectors(__global struct dom_node *first, \n"
+    "__kernel void match_selectors(__global int *ids, \n"
+    "                              __global int *tag_names, \n"
+    "                              __global int *class_counts, \n"
+    "                              __global int *classes, \n"
     "                              __global struct css_stylesheet *stylesheet, \n"
-    "                              __global struct css_property *properties, \n"
-    "                              __global int *classes) {\n"
+    "                              __global const struct css_rule *__global *matched_rules, \n"
+    "                              __global int *matched_rule_counts) {\n"
     "   int index = get_global_id(0);\n"
-    "   " XSTRINGIFY(MATCH_SELECTORS(first,
-                                     stylesheet,
-                                     properties,
+    "   " XSTRINGIFY(MATCH_SELECTORS(ids,
+                                     tag_names,
+                                     class_counts,
                                      classes,
+                                     stylesheet,
+                                     matched_rules,
+                                     matched_rule_counts,
                                      index,
                                      css_cuckoo_hash_find,
                                      css_rule_hash,
@@ -228,44 +232,72 @@ void go(cl_platform_id platform, time_t seed, cl_device_type device_type, int mo
     srand(seed);
 
     struct css_stylesheet *host_stylesheet = NULL;
-    struct css_property *host_properties = NULL;
-    struct dom_node *host_dom = NULL;
+    const struct css_rule **host_matched_rules = NULL;
+    int *host_matched_rule_counts = NULL;
+    int *host_ids = NULL;
+    int *host_tag_names = NULL;
+    int *host_class_counts = NULL;
     int *host_classes = NULL;
 
-    cl_mem device_dom, device_stylesheet, device_properties, device_classes;
+    cl_mem device_ids, device_tag_names, device_class_counts, device_stylesheet, device_classes;
+    cl_mem device_matched_rules, device_matched_rule_counts;
     if (mode != MODE_SVM) {
         MALLOC(context,
                commands,
                err,
                mode,
-               dom,
+               ids,
                CL_MEM_READ_WRITE,
-               struct dom_node,
+               int,
                NODE_COUNT);
         MALLOC(context,
                commands,
                err,
                mode,
+               tag_names,
+               CL_MEM_READ_WRITE,
+               int,
+               NODE_COUNT);
+        MALLOC(context,
+               commands,
+               err,
+               mode,
+               class_counts,
+               CL_MEM_READ_WRITE,
+               int,
+               NODE_COUNT);
+        MALLOC(context,
+               commands,
+               err,
+               mode,
+               classes,
+               CL_MEM_READ_WRITE,
+               int,
+               CLASS_COUNT);
+        MALLOC(context,
+               commands,
+               err,
+               mode,
                stylesheet,
-               CL_MEM_READ_ONLY,
+               CL_MEM_READ_WRITE,
                struct css_stylesheet,
                1);
         MALLOC(context,
                commands,
                err,
                mode,
-               properties,
-               CL_MEM_READ_ONLY,
-               struct css_property,
-               PROPERTY_COUNT);
+               matched_rules,
+               CL_MEM_READ_WRITE,
+               const struct css_rule *,
+               (MAX_MATCHED_RULES * NODE_COUNT));
         MALLOC(context,
                commands,
                err,
                mode,
-               classes,
-               CL_MEM_READ_ONLY,
+               matched_rule_counts,
+               CL_MEM_READ_WRITE,
                int,
-               CLASS_COUNT);
+               NODE_COUNT);
     } else {
 #ifndef NO_SVM
         // Allocate the rule tree.
@@ -300,9 +332,15 @@ void go(cl_platform_id platform, time_t seed, cl_device_type device_type, int mo
     // Create the stylesheet and the DOM.
     uint64_t start = mach_absolute_time();
     int property_index = 0;
-    create_stylesheet(host_stylesheet, host_properties, &property_index);
+    create_stylesheet(host_stylesheet, &property_index);
     int class_count = 0, global_count = 0;
-    create_dom(host_dom, host_classes, NULL, &class_count, &global_count, 0);
+    create_dom(host_ids,
+               host_tag_names,
+               host_class_counts,
+               host_classes,
+               &class_count,
+               &global_count,
+               0);
 
     double elapsed = (double)(mach_absolute_time() - start) / 1000000.0;
     report_timing(device_name, "stylesheet/DOM creation", elapsed, false, mode);
@@ -318,14 +356,26 @@ void go(cl_platform_id platform, time_t seed, cl_device_type device_type, int mo
                                          NULL,
                                          NULL));
         CHECK_CL(clEnqueueUnmapMemObject(commands,
-                                         device_properties,
-                                         host_properties,
+                                         device_matched_rules,
+                                         host_matched_rules,
                                          0,
                                          NULL,
                                          NULL));
         CHECK_CL(clEnqueueUnmapMemObject(commands,
-                                         device_dom,
-                                         host_dom,
+                                         device_class_counts,
+                                         host_class_counts,
+                                         0,
+                                         NULL,
+                                         NULL));
+        CHECK_CL(clEnqueueUnmapMemObject(commands,
+                                         device_tag_names,
+                                         host_tag_names,
+                                         0,
+                                         NULL,
+                                         NULL));
+        CHECK_CL(clEnqueueUnmapMemObject(commands,
+                                         device_ids,
+                                         host_ids,
                                          0,
                                          NULL,
                                          NULL));
@@ -346,21 +396,31 @@ void go(cl_platform_id platform, time_t seed, cl_device_type device_type, int mo
                                       0,
                                       NULL,
                                       NULL));
+        CHECK_CL(clEnqueueWriteBuffer(
+                    commands,
+                    device_matched_rules,
+                    CL_TRUE,
+                    0,
+                    sizeof(const struct css_rule *) * MAX_MATCHED_RULES * NODE_COUNT,
+                    host_matched_rules,
+                    0,
+                    NULL,
+                    NULL));
         CHECK_CL(clEnqueueWriteBuffer(commands,
-                                      device_properties,
+                                      device_ids,
                                       CL_TRUE,
                                       0,
-                                      sizeof(struct css_property) * PROPERTY_COUNT,
-                                      host_properties,
+                                      sizeof(int) * NODE_COUNT,
+                                      host_ids,
                                       0,
                                       NULL,
                                       NULL));
         CHECK_CL(clEnqueueWriteBuffer(commands,
-                                      device_dom,
+                                      device_tag_names,
                                       CL_TRUE,
                                       0,
-                                      sizeof(struct dom_node) * NODE_COUNT,
-                                      host_dom,
+                                      sizeof(int) * NODE_COUNT,
+                                      host_tag_names,
                                       0,
                                       NULL,
                                       NULL));
@@ -368,8 +428,17 @@ void go(cl_platform_id platform, time_t seed, cl_device_type device_type, int mo
                                       device_classes,
                                       CL_TRUE,
                                       0,
-                                      sizeof(struct dom_node) * NODE_COUNT,
+                                      sizeof(int) * CLASS_COUNT,
                                       host_classes,
+                                      0,
+                                      NULL,
+                                      NULL));
+        CHECK_CL(clEnqueueWriteBuffer(commands,
+                                      device_class_counts,
+                                      CL_TRUE,
+                                      0,
+                                      sizeof(int) * NODE_COUNT,
+                                      host_class_counts,
                                       0,
                                       NULL,
                                       NULL));
@@ -377,10 +446,13 @@ void go(cl_platform_id platform, time_t seed, cl_device_type device_type, int mo
 
     // Set the arguments to the kernel.
     if (mode != MODE_SVM) {
-        CHECK_CL(clSetKernelArg(kernel, 0, sizeof(cl_mem), &device_dom));
-        CHECK_CL(clSetKernelArg(kernel, 1, sizeof(cl_mem), &device_stylesheet));
-        CHECK_CL(clSetKernelArg(kernel, 2, sizeof(cl_mem), &device_properties));
+        CHECK_CL(clSetKernelArg(kernel, 0, sizeof(cl_mem), &device_ids));
+        CHECK_CL(clSetKernelArg(kernel, 1, sizeof(cl_mem), &device_tag_names));
+        CHECK_CL(clSetKernelArg(kernel, 2, sizeof(cl_mem), &device_class_counts));
         CHECK_CL(clSetKernelArg(kernel, 3, sizeof(cl_mem), &device_classes));
+        CHECK_CL(clSetKernelArg(kernel, 4, sizeof(cl_mem), &device_stylesheet));
+        CHECK_CL(clSetKernelArg(kernel, 5, sizeof(cl_mem), &device_matched_rules));
+        CHECK_CL(clSetKernelArg(kernel, 6, sizeof(cl_mem), &device_matched_rule_counts));
     } else {
 #ifndef NO_SVM
         CHECK_CL(clSetKernelArgSVMPointerAMD(kernel, 0, host_dom));
@@ -423,28 +495,51 @@ void go(cl_platform_id platform, time_t seed, cl_device_type device_type, int mo
     report_timing(device_name, "kernel execution", elapsed, false, mode);
 
     if (mode != MODE_SVM) {
-        // Retrieve the DOM.
-        struct dom_node *device_dom_mirror = (struct dom_node *)malloc(sizeof(struct dom_node) *
-                                                                       NODE_COUNT);
-        CHECK_CL(clEnqueueReadBuffer(commands,
-                                     device_dom,
-                                     CL_TRUE,
-                                     0,
-                                     sizeof(struct dom_node) * NODE_COUNT,
-                                     device_dom_mirror,
-                                     0,
-                                     NULL,
-                                     NULL));
+        // Retrieve the matched properties.
+        const struct css_rule **device_matched_rules_mirror =
+            (const struct css_rule **)malloc(
+                    sizeof(const struct css_rule *) * MAX_MATCHED_RULES * NODE_COUNT);
+        CHECK_CL(clEnqueueReadBuffer(
+                    commands,
+                    device_matched_rules,
+                    CL_TRUE,
+                    0,
+                    sizeof(const struct css_rule *) * MAX_MATCHED_RULES * NODE_COUNT,
+                    device_matched_rules_mirror,
+                    0,
+                    NULL,
+                    NULL));
+        int *device_matched_rule_counts_mirror = (int *)malloc(sizeof(int) * NODE_COUNT);
+        CHECK_CL(clEnqueueReadBuffer(
+                    commands,
+                    device_matched_rule_counts,
+                    CL_TRUE,
+                    0,
+                    sizeof(int) * NODE_COUNT,
+                    device_matched_rule_counts_mirror,
+                    0,
+                    NULL,
+                    NULL));
         clFinish(commands);
 
-        check_dom(device_dom_mirror, host_classes);
+        check_dom(host_ids,
+                  host_tag_names,
+                  host_class_counts,
+                  host_classes,
+                  device_matched_rules_mirror,
+                  device_matched_rule_counts_mirror);
 
-        clReleaseMemObject(device_dom);
-        clReleaseMemObject(device_stylesheet);
-        clReleaseMemObject(device_properties);
+        clReleaseMemObject(device_ids);
+        clReleaseMemObject(device_tag_names);
+        clReleaseMemObject(device_class_counts);
         clReleaseMemObject(device_classes);
+        clReleaseMemObject(device_stylesheet);
+        clReleaseMemObject(device_matched_rules);
+        clReleaseMemObject(device_matched_rule_counts);
     } else {
+#if 0
         check_dom(host_dom, host_classes);
+#endif
     }
 
     clReleaseProgram(program);
@@ -468,9 +563,9 @@ int main() {
     cl_uint num_platforms;
     CHECK_CL(clGetPlatformIDs(10, platforms, &num_platforms));
     fprintf(stderr,
-            "%d platform(s) available: first ID %d\n",
+            "%d platform(s) available: first ID %lx\n",
             (int)num_platforms,
-            (int)platforms[0]);
+            (uintptr_t)platforms[0]);
     cl_platform_id platform = platforms[0];
 
     PRINT_PLATFORM_INFO(platform, PROFILE);
@@ -479,15 +574,15 @@ int main() {
     PRINT_PLATFORM_INFO(platform, VENDOR);
     PRINT_PLATFORM_INFO(platform, EXTENSIONS);
 
-    fprintf(stderr, "Size of a DOM node: %d\n", (int)sizeof(struct dom_node));
-
     time_t seed = time(NULL);
 
-    go(platform, seed, CL_DEVICE_TYPE_GPU, MODE_MAPPED);
+    go(platform, seed, CL_DEVICE_TYPE_CPU, MODE_COPYING);
+    go(platform, seed, CL_DEVICE_TYPE_CPU, MODE_MAPPED);
+    //go(platform, seed, CL_DEVICE_TYPE_GPU, MODE_COPYING);
 #ifndef NO_SVM
     go(platform, seed, CL_DEVICE_TYPE_GPU, MODE_SVM);
 #endif
-    go(platform, seed, CL_DEVICE_TYPE_CPU, MODE_MAPPED);
+    //go(platform, seed, CL_DEVICE_TYPE_CPU, MODE_MAPPED);
     return 0;
 }
 
